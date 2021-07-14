@@ -48,10 +48,9 @@
 
 uint8_t ir_nec_last_address = 0;
 uint8_t ir_nec_last_command = 0;
-uint8_t ir_nec_rx_complete_flag = 0;
+volatile uint8_t ir_nec_rx_complete_flag = 0;
 #define IR_NEC_RX_COMPLETE 1
 #define IR_NEC_REPEAT_CODE 2
-
 
 
 /*
@@ -65,19 +64,17 @@ char ir_nec_getchar(FILE * stream){
 	// Extract user data from the FILE structure
 	ir_nec_conf_t * conf = (ir_nec_conf_t *) fdev_get_udata(stream);
 	
+	// Accept transmissions infinitely, until we get a transmission destined correctly.
 	while(1){
-		printf("Listening\n");
 		// Wait until a message is received completely
-		uint8_t vx = 0;
-		do {PORTB ^= (1 << 5);} while (!ir_nec_rx_complete_flag );
-		printf("%x, %x, %X, %x\r\n", ir_nec_rx_complete_flag, !ir_nec_rx_complete_flag, ir_nec_last_address, ir_nec_last_command);
+		do {} while (!ir_nec_rx_complete_flag);
 
 		// If the received signal was a repeat code and we ignore them,
 		// wait for another transmission.
 		if (!conf->respect_repeat_codes && (ir_nec_rx_complete_flag == IR_NEC_REPEAT_CODE)) {
 			// Clear the flag to enable incoming transmissions
 			ir_nec_rx_complete_flag = 0;
-			continue;
+			continue; // go accept another transmission
 		}
 
 		// Clear the flag to enable incoming transmissions
@@ -148,6 +145,7 @@ uint8_t ir_nec_demodulator_fsa_clock = 0xFF;
  */
 inline void ir_nec_tick(){
 	ir_nec_demodulator_fsa_clock++;
+	PORTB ^= (1 << 5);
 }
 
 /* 
@@ -215,6 +213,9 @@ void ir_nec_process_pin_change(uint8_t new_bit){
 	#define IR_NEC_FSA_STATE_REPEAT_CODE	4
 	// This is a repeat code which consists of a 9 ms leading pulse, a 2.25
 	// ms gap and a single 562.5 us pulse.
+
+	#define IR_NEC_FSA_STATE_LASTPULSE	5
+	// Trailing 562.5 us pulse finishing the message body.
 
 	static uint8_t fsa_state = IR_NEC_FSA_STATE_IDLE;
 
@@ -286,17 +287,22 @@ void ir_nec_process_pin_change(uint8_t new_bit){
 			shift_register <<= 1;
 		} else if (!was_positive_pulse(IR_NEC_CLOCK_562us)) {
 			// Only the following pulses are expected at this mode:
-			// a 562.5 us positive pulse.
-			// a 562.5 us negative pulse.
-			// a 1687.5 us negative pulse,
+			// a 562.5 us positive pulse (delimiter)
+			// a 562.5 us negative pulse (logical 0).
+			// a 1687.5 us negative pulse (logical 1),
 			// If anything other has been received, this is a
 			// malformed transmission.
 			fsa_state = IR_NEC_FSA_STATE_MALFORMED;
-			printf("MB,%d\n", ir_nec_demodulator_fsa_clock);
+			printf("MB,%d, %d\n", ir_nec_demodulator_fsa_clock, bits_received);
 		}
-
-		// A new 32-bit message has been received, decode it.
-		if (bits_received == 32) {
+		if (bits_received == 32){
+			fsa_state = IR_NEC_FSA_STATE_LASTPULSE;
+		}
+		break;
+	case IR_NEC_FSA_STATE_LASTPULSE:
+		// The last pulse in the code should be a single 562.5 us pulse.
+		if (was_positive_pulse(IR_NEC_CLOCK_562us)) {
+			fsa_state = IR_NEC_FSA_STATE_IDLE;
 			// Decode a 32-bit logical code obtained after the
 			// demodulation to obtain a 8-bit command.  The 32-bit
 			// code consists of the following (starting from the
@@ -312,30 +318,36 @@ void ir_nec_process_pin_change(uint8_t new_bit){
 			shift_register = 0;
 			bits_received = 0;
 
+#ifndef BEHOLDTV_REMOTECONTROL
 			// Verify that address equals inverse of its inverse,
 			// and the same holds for the command.
 			if ( (rx_address == rx_address_verification)
-			  || (rx_command == rx_command_verification)) {
+#else
+			// Check the address bits from the BeholdTV remote control,
+			// that uses a proprietary variant of the NEC protocol.
+			// This remote control is used for debugging.
+			if ((rx_address == 0x61 && rx_address_verification == 0x29)
+#endif
+			  && (rx_command == rx_command_verification)) {
 				// If all checks passed, update the global
 				// variable and set the Receive complete flag.
 				ir_nec_last_address = rx_address;
 				ir_nec_last_command = rx_command;
 				ir_nec_rx_complete_flag = IR_NEC_RX_COMPLETE;
 				fsa_state = IR_NEC_FSA_STATE_IDLE;
-		printf("r%x, %x, %X, %x\r\n", ir_nec_rx_complete_flag, !ir_nec_rx_complete_flag, ir_nec_last_address, ir_nec_last_command);
 			} else {
+				// The checks have not passed, so this transmission
+				// is malformed
 				fsa_state = IR_NEC_FSA_STATE_MALFORMED;
 			} 
+		} else {
+			// The last pulse has a wrong duration, so this is a
+			// malformed transmission.
+			fsa_state = IR_NEC_FSA_STATE_MALFORMED;
 		}
-		break;
 	}
 	uint8_t old_clk = ir_nec_demodulator_fsa_clock;
 	// Reset the pulse-width-measuring software clock
 	ir_nec_demodulator_fsa_clock = 0;
 	
-//	sei();
-//	// THIS IS FOR DEBUG!!
-	//printf("Current state %d[%d],time:%d; Buffer: %lX(%d); flag: %d. Last A:%x,C:%x.\r\n", fsa_state, new_bit, old_clk, shift_register, bits_received, ir_nec_rx_complete_flag, ir_nec_last_address, ir_nec_last_command);
-
-
 }

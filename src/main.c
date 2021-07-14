@@ -9,9 +9,11 @@
 #include <avr/sfr_defs.h>
 
 #include <util/delay.h>
+#define BEHOLDTV_REMOTECONTROL
 
 //#include "lib/ir_nec.h"
 #include "lib/ir_nec.c"
+
 
 #include "uart.h"
 #include "uart.c"
@@ -25,6 +27,7 @@ uint8_t v = 0;
 ISR(PCINT0_vect){
 	v++;
 	/* Logical pin change interrupt vector. */
+	sei(); // Enable nested interrupts
 	ir_nec_process_pin_change((PORT_IR >> PIN_IR) & 1);
 }
 
@@ -65,14 +68,14 @@ static inline void init_pendulum(){
 }
 
 int main(){
-	FILE ir_nec_file = fdev_open_ir_nec(ir_nec_in, IR_NEC_REPEAT_CODES_IGNORE, 0x00, IR_NEC_ADDRESSMODE_IGNORE);
+	FILE ir_nec_file = fdev_open_ir_nec(ir_nec_in, IR_NEC_REPEAT_CODES_RESPECT, 0x00, IR_NEC_ADDRESSMODE_IGNORE);
 	FILE * ir_nec_in = &ir_nec_file;
 
-	DDRB = (1 << 5);
+	DDRB = (1 << 5) | (1 << 4);
 	PCICR = 1 << PCIE0;
 	PCMSK0 = 1 << PIN_IR;
 
-	PORTB ^= 1 << 5;
+//	PORTB ^= 1 << 5;
 	sei();
 	
 	uart_init(_BV(TXEN0));
@@ -82,7 +85,7 @@ int main(){
 	while (1){
 		_delay_ms(50);
 		char command = ir_nec_getchar(ir_nec_in);
-		printf("Received command %d: %x\n", command, command);
+		printf("Received command %d: %x\r\n", command, (uint8_t) command);
 	}
 	return 0;
 }
