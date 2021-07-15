@@ -62,16 +62,22 @@ static inline void init_pendulum(){
 	TCCR0A = _BV(WGM01); 
 	TCCR0B = _BV(CS00) | _BV(CS01); // divide system clock by 64
 
+	// Set up PWM by OCR0B compare
+	TCCR0A |= _BV(COM0B1) | _BV(COM0B0); // Set OC0B on Compare Match
+
 	// Set Clear Timer on Compare Match (CTC) mode. In this mode, it acts as
 	// the oscillator (16 MHz) frequency divider, dividing it by the (OCR0 + 1) value.
 	OCR0A = 140; // 16 MHz / 223 = 2 x 36 kHz 
-//	OCR0B = 141; // 16 MHz / 223 = 2 x 36 kHz
+	OCR0B = 140; // 16 MHz / 223 = 2 x 36 kHz
 
 	TIMSK0 = _BV(OCIE0A); // Enable interrupt
 }
 
+#define BEHOLDTV_REMOTECONTROL_ADDRESS 0x61D6
+#define HYUNDAI_REMOTECONTROL_ADDRESS 0x8E40
+
 int main(){
-	FILE ir_nec_file = fdev_open_ir_nec(ir_nec_in, IR_NEC_REPEAT_CODES_RESPECT, 0x00, IR_NEC_ADDRESSMODE_IGNORE);
+	FILE ir_nec_file = fdev_open_ir_nec(ir_nec_in, IR_NEC_REPEAT_CODES_RESPECT, BEHOLDTV_REMOTECONTROL_ADDRESS, IR_NEC_ADDRESSMODE_EXACT);
 	FILE * ir_nec_in = &ir_nec_file;
 
 	DDRB = (1 << 5) | (1 << 4);
@@ -86,8 +92,43 @@ int main(){
 	init_pendulum();
 	while (1){
 		_delay_ms(50);
-		char command = ir_nec_getchar(ir_nec_in);
+		uint8_t command = (uint8_t) ir_nec_getchar(ir_nec_in);
 		printf("Received command %d: %x\r\n", command, (uint8_t) command);
+		int8_t pwm = 0;
+		switch(command){
+		case 0:
+			pwm = 0;
+			break;
+		case 0x80:
+			pwm = 1;
+			break;
+		case 0x40:
+			pwm = 2;
+			break;
+		case 0xc0:
+			pwm = 3;
+			break;
+		case 0x20:
+			pwm = 4;
+			break;
+		case 0xa0:
+			pwm = 5;
+			break;
+		case 0x60:
+			pwm = 6;
+			break;
+		case 0xe0:
+			pwm = 7;
+			break;
+		case 0x10:
+			pwm = 8;
+			break;
+		case 0x90:
+			pwm = 9;
+			break;
+		default:
+			continue;
+		}
 	}
 	return 0;
 }

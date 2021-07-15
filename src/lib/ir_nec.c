@@ -41,8 +41,8 @@
 
 
 
-uint8_t ir_nec_last_address = 0;
-uint8_t ir_nec_last_command = 0;
+volatile uint16_t ir_nec_last_address = 0;
+volatile uint8_t ir_nec_last_command = 0;
 volatile uint8_t ir_nec_rx_complete_flag = 0;
 #define IR_NEC_RX_COMPLETE 1
 #define IR_NEC_REPEAT_CODE 2
@@ -254,7 +254,7 @@ void ir_nec_process_pin_change(){
 			uint8_t rx_address =			(uint8_t)  ((shift_register >> 24) & 0xFF);
 			uint8_t rx_address_verification =	(uint8_t) ~((shift_register >> 16) & 0xFF);
 	#else
-			uint16_t rx_address =			(uint16_t) ((shift_register >> 16) & 0xFF);
+			uint16_t rx_address =			(uint16_t) ((shift_register >> 16) & 0xFFFF);
 	#endif
 			uint8_t rx_command =			(uint8_t)  ((shift_register >> 8) & 0xFF);
 			uint8_t rx_command_verification =	(uint8_t) ~((shift_register >> 0) & 0xFF);
