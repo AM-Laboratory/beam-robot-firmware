@@ -9,9 +9,12 @@
 #include <avr/sfr_defs.h>
 
 #include <util/delay.h>
-#define BEHOLDTV_REMOTECONTROL
 
-//#include "lib/ir_nec.h"
+#define PERIOD_MEASUREMENT_SOFTWARE
+#define HWTIMER_FREQUENCY 1777l
+#define PERIOD_TIMER_FREQUENCY 1777l
+#include "lib/timer_period.c"
+
 #include "lib/ir_nec.c"
 
 
@@ -22,13 +25,13 @@
 #define PORT_IR PINB
 #define PIN_IR 3
 
-uint8_t v = 0;
 
 ISR(PCINT0_vect){
-	v++;
 	/* Logical pin change interrupt vector. */
 	sei(); // Enable nested interrupts
-	ir_nec_process_pin_change((PORT_IR >> PIN_IR) & 1);
+	if (((PORT_IR >> PIN_IR) & 1) == 0){
+		ir_nec_process_pin_change();
+	}
 }
 
 
@@ -48,7 +51,7 @@ ISR(TIMER0_COMPA_vect){
 
 inline void tick(){
 
-	ir_nec_tick();
+	software_timer_tick((uint16_t) TCNT0);
 //	supertimer++;
 //	if (supertimer % MULTIPLE_1777Hz == 0) {
 //		ir_nec_tick();
@@ -75,7 +78,6 @@ int main(){
 	PCICR = 1 << PCIE0;
 	PCMSK0 = 1 << PIN_IR;
 
-//	PORTB ^= 1 << 5;
 	sei();
 	
 	uart_init(_BV(TXEN0));

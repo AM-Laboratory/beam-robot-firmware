@@ -18,13 +18,6 @@
  */
 char ir_nec_getchar(FILE * stream);
 
-/* Tick the finite-state automaton software clock. This function MUST be called
- * each 562.5 us (1777 Hz clock) in order to demodulate the NEC protocol
- * signals correctly.
- */
-inline void ir_nec_tick();
-
-
 typedef struct {
 	// This flag governs whether or not to respect repeat codes sent by the
 	// remote control while its key is held depressed. These codes are sent
@@ -33,7 +26,7 @@ typedef struct {
 	// up key is held depressed.
 	uint8_t respect_repeat_codes;
 	// The address of this device, or a bitmask.
-	uint8_t this_device_address;
+	uint16_t this_device_address;
 	// This setting determines how to deal with the address: equivalence
 	// check, bitmask check, or ignore the address check.
 	uint8_t address_mode;
@@ -58,7 +51,7 @@ typedef struct {
  *                               0 - ignore the repeat codes, only accept new
  *                                   codes;
  *                               1 - respect the repeat codes.
- * uint8_t this_device_address: The address of this device, or a bitmask.
+ * uint16_t this_device_address: The address of this device, or a bitmask.
  * uint8_t address_mode: This setting determines how to deal with the address:
  *                       equivalence check, bitmask check, or ignore the
  *                       address check. Allowed values:
@@ -126,6 +119,5 @@ typedef struct {
  *
  * After receiving the last bit, the 
  *
- * Arguments: uint8_t new_bit - new pin value (0 or 1).
  */
-void ir_nec_process_pin_change(uint8_t new_bit);
+void ir_nec_process_pin_change();
