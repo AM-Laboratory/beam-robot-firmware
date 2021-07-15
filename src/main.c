@@ -25,6 +25,10 @@
 #define PORT_IR PINB
 #define PIN_IR 3
 
+#if __AVR_DEVICE_NAME__ != atmega328
+#error "Devices other than atmega328p not supported"
+#endif
+
 
 ISR(PCINT0_vect){
 	/* Logical pin change interrupt vector. */
@@ -59,16 +63,16 @@ inline void tick(){
 }
 
 static inline void init_pendulum(){
-	TCCR0A = _BV(WGM01); 
-	TCCR0B = _BV(CS00) | _BV(CS01); // divide system clock by 64
+//	TCCR0A = _BV(WGM01) | _BV(COM0B1); // CTC; Set OC0B on Compare Match
+	TCCR0A = _BV(WGM01) | _BV(WGM00) | _BV(COM0B1); // CTC; Set OC0B on Compare Match
+	TCCR0B = _BV(WGM02) | _BV(CS00) | _BV(CS01); // divide system clock by 64
 
 	// Set up PWM by OCR0B compare
-	TCCR0A |= _BV(COM0B1) | _BV(COM0B0); // Set OC0B on Compare Match
 
 	// Set Clear Timer on Compare Match (CTC) mode. In this mode, it acts as
 	// the oscillator (16 MHz) frequency divider, dividing it by the (OCR0 + 1) value.
 	OCR0A = 140; // 16 MHz / 223 = 2 x 36 kHz 
-	OCR0B = 140; // 16 MHz / 223 = 2 x 36 kHz
+	OCR0B = 0; // 16 MHz / 223 = 2 x 36 kHz
 
 	TIMSK0 = _BV(OCIE0A); // Enable interrupt
 }
@@ -80,6 +84,7 @@ int main(){
 	FILE ir_nec_file = fdev_open_ir_nec(ir_nec_in, IR_NEC_REPEAT_CODES_RESPECT, BEHOLDTV_REMOTECONTROL_ADDRESS, IR_NEC_ADDRESSMODE_EXACT);
 	FILE * ir_nec_in = &ir_nec_file;
 
+	DDRD = (1 << 5); // Enable PWM out
 	DDRB = (1 << 5) | (1 << 4);
 	PCICR = 1 << PCIE0;
 	PCMSK0 = 1 << PIN_IR;
@@ -129,6 +134,8 @@ int main(){
 		default:
 			continue;
 		}
+		OCR0B = 14 * pwm; // PWM
+		printf("Set OCR0B: %d/140\r\n", OCR0B);
 	}
 	return 0;
 }
