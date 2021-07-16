@@ -19,12 +19,7 @@
  *    is demodulated to obtain a 32-bit logical code. This signal can either
  *    carry a new 32-bit code, or be a repeat code. In the repeat code case,
  *    the previous received 32-bit code is returned by the corresponding
- *    procedure.  This operation is performed by a finite-state automaton,
- *    which measures the pulse widths and distances using a 1777 Hz (562.5 us)
- *    software clock. This is done by the function
- *    ir_nec_process_pin_change(uint8_t new_bit),
- *    while the software clock is ticked by a function
- *    ir_nec_demodulator_fsa_tick().
+ *    procedure. 
  * 3. The logical 32-bit code, which consists of:
  *    1. target device address (8 bits),
  *    2. logical inverse of the target device address (8 bits),
@@ -46,8 +41,8 @@
 
 
 
-uint8_t ir_nec_last_address = 0;
-uint8_t ir_nec_last_command = 0;
+volatile uint16_t ir_nec_last_address = 0;
+volatile uint8_t ir_nec_last_command = 0;
 volatile uint8_t ir_nec_rx_complete_flag = 0;
 #define IR_NEC_RX_COMPLETE 1
 #define IR_NEC_REPEAT_CODE 2
@@ -124,30 +119,6 @@ char ir_nec_getchar(FILE * stream){
 	}
 }
 
-
-// 562.5 us-per-tick software clock used to measure the pulse widths and the
-// distances between pulses, to decode a pulse-distance modulated logical code.
-// As in the NEC protocol every possible pulse duration is a multiple of 562.5
-// us, we choose this time quantum for the clock. As this clock is used to
-// measure pulse widths, it is reset to zero at each incoming pulse edge by the
-// ir_nec_demodulator_fsa_process_pin_change() function.
-#define IR_NEC_CLOCK_562us 1
-#define IR_NEC_CLOCK_1125us 2
-#define IR_NEC_CLOCK_1687us 3
-#define IR_NEC_CLOCK_2250us 4
-#define IR_NEC_CLOCK_4500us 8
-#define IR_NEC_CLOCK_9000us 16
-uint8_t ir_nec_demodulator_fsa_clock = 0xFF;
-
-/* Tick the finite-state automaton software clock. This function MUST be called
- * each 562.5 us (1777 Hz clock) in order to demodulate the NEC protocol
- * signals correctly.
- */
-inline void ir_nec_tick(){
-	ir_nec_demodulator_fsa_clock++;
-	PORTB ^= (1 << 5);
-}
-
 /* 
  * A finite-state automaton (FSA) used for demodulating a pulse-distance
  * modulated signal into a 32-bit logical code.  Uses a software clock
@@ -177,11 +148,12 @@ inline void ir_nec_tick(){
  * measuring the distance between pulses (pulse-distance modulation) is
  * shifted into the shift register.
  *
- * After receiving the last bit, the 
+ * After receiving the last bit, the message is decoded and verified for
+ * validness.
  *
  * Arguments: uint8_t new_bit - new pin value (0 or 1).
  */
-void ir_nec_process_pin_change(uint8_t new_bit){
+void ir_nec_process_pin_change(){
 	// 32-bit shift register to store the demodulated 32-bit logical sequence.
 	static uint32_t shift_register = 0;
 	static uint8_t bits_received = 0; // received bits count
@@ -190,7 +162,7 @@ void ir_nec_process_pin_change(uint8_t new_bit){
 	// Waiting for a next incoming transmission after successfully
 	// receiving a code or receiving a malformed transmission.
 
-	#define IR_NEC_FSA_STATE_MALFORMED	0
+	#define IR_NEC_FSA_STATE_MALFORMED	2
 	// Waiting for a next incoming transmission after receiving a malformed
 	// transmission, which is ignored silently.
 	// Note: IR_NEC_FSA_STATE_IDLE and IR_NEC_FSA_STATE_MALFORMED are
@@ -200,110 +172,77 @@ void ir_nec_process_pin_change(uint8_t new_bit){
 	#define IR_NEC_FSA_STATE_LEADING_PULSE	1
 	// The first pin change has been observed; what is expected to be
 	// received now is a 9 ms leading pulse which marks a NEC protocol
-	// code.
-
-	#define IR_NEC_FSA_STATE_LEADING_GAP	2
-	// A leading 9 ms pulse has been received. Waiting for a next positive
-	// pulse which may be a repeat code or a significant bit of a 32-bit
-	// code.
+	// code. It may be followed by either a 4.5 ms gap, which precedes
+	// a new 32-bit message, or a 2.25 ms gap followed by a terminating
+	// 562.5 us pulse, which is a repeat code sent repeatedly while an IR
+	// remote control button is held depressed.
 
 	#define IR_NEC_FSA_STATE_MESSAGE_BODY	3
 	// The 32 significant bits of a new code are now received.
 
-	#define IR_NEC_FSA_STATE_REPEAT_CODE	4
-	// This is a repeat code which consists of a 9 ms leading pulse, a 2.25
-	// ms gap and a single 562.5 us pulse.
-
-	#define IR_NEC_FSA_STATE_LASTPULSE	5
-	// Trailing 562.5 us pulse finishing the message body.
-
 	static uint8_t fsa_state = IR_NEC_FSA_STATE_IDLE;
-
-	#define was_positive_pulse(length) (new_bit && (ir_nec_demodulator_fsa_clock <= (length + 1)) && (ir_nec_demodulator_fsa_clock >= (length - 1)))
-	#define was_negative_pulse(length) (!new_bit && (ir_nec_demodulator_fsa_clock <= (length + 1)) && (ir_nec_demodulator_fsa_clock >= (length - 1)))
 
 	switch(fsa_state){
 	case IR_NEC_FSA_STATE_IDLE:
-		if(!new_bit){
-			// This is the start of a new transmission.
-			fsa_state = IR_NEC_FSA_STATE_LEADING_PULSE;
-		}
+	case IR_NEC_FSA_STATE_MALFORMED:
+		// We are on the rising edge of the leading pulse. The timer
+		// now contains the time passed since the last transmission,
+		// i.e., garbage. This leading edge will be used to measure the
+		// initial period length from.
+		timer_period_length_equals(0); // Reset the timer
+		fsa_state = IR_NEC_FSA_STATE_LEADING_PULSE;
 		break;
 	case IR_NEC_FSA_STATE_LEADING_PULSE:
 		// Transmission has been initiated, but no bits received yet.
 		// This is a start sequence.
-		if (was_positive_pulse(IR_NEC_CLOCK_9000us)) {
-			// This was a leading 9 ms positive pulse, next is the gap
-			fsa_state = IR_NEC_FSA_STATE_LEADING_GAP;
-		} else {
-			// This is a malformed transmission, presumably noise.
-			fsa_state = IR_NEC_FSA_STATE_MALFORMED;
-			printf("LP,%d\n", ir_nec_demodulator_fsa_clock);
-		}
-		break;
-	case IR_NEC_FSA_STATE_LEADING_GAP:
-		// A 4.5 ms or 2.25 ms gap after the 9 ms leading pulse.
-		// A 4.5 ms gap precedes a new 32-bit code.
-		// A 2.25 ms gap precedes a single 562.5 us pulse, which marks a repeat code.
-		if (was_negative_pulse(IR_NEC_CLOCK_4500us)) {
-			// This was a leading 4.5 ms gap, which precedes a new incoming code.
+		if (timer_period_length_equals(9000e-6 + 4500e-6)) {
+			// This was a leading 9 ms pulse followed by a 4.5 ms
+			// gap, which precedes a new incoming code.
 			fsa_state = IR_NEC_FSA_STATE_MESSAGE_BODY;
 			// Clear the shift register
 			shift_register = 0;
 			bits_received = 0;
-		} else if (was_negative_pulse(IR_NEC_CLOCK_2250us)) {
-			// This was a leading 2.25 ms gap, which marks a repeat code.
-			fsa_state = IR_NEC_FSA_STATE_REPEAT_CODE;
+		} else if (timer_period_length_equals(9000e-6 + 2250e-6)) {
+			// This was a leading 9 ms pulse followed by a 2.25 ms
+			// gap, which indicates a repeat code. We are now on
+			// the rising edge of a terminating 562.5 us pulse.
+			// Its falling edge will be ignored. Therefore we
+			// return the FSA to the idle state here.
+			ir_nec_rx_complete_flag = IR_NEC_REPEAT_CODE;
+			// FIXME: what if the last code was malformed?
+			// Need to add protection from repeating it.
+			fsa_state = IR_NEC_FSA_STATE_IDLE;
 		} else {
 			// This is a malformed transmission, presumably noise.
 			fsa_state = IR_NEC_FSA_STATE_MALFORMED;
-			printf("LG,%d\n", ir_nec_demodulator_fsa_clock);
-		}
-		break;
-	case IR_NEC_FSA_STATE_REPEAT_CODE:
-		// The last pulse in the repeat code should be a single 562.5 us pulse.
-		if (was_positive_pulse(IR_NEC_CLOCK_562us)) {
-			// Mark 32 bits as received, but do not update the shift register value:
-			// a repeat code means that the previous code is to be input one more time.
-			ir_nec_rx_complete_flag = IR_NEC_REPEAT_CODE;
-			fsa_state = IR_NEC_FSA_STATE_IDLE;
-		} else {
-			// If it was not, this is a malformed transmission
-			fsa_state = IR_NEC_FSA_STATE_MALFORMED;
-			printf("RC,%d\n", ir_nec_demodulator_fsa_clock);
 		}
 		break;
 	case IR_NEC_FSA_STATE_MESSAGE_BODY:
 		// Receiving a new significant pulse-distance modulated 32-bit code.
-		if (was_negative_pulse(IR_NEC_CLOCK_1687us)) {
-			// 1687.5 us gap duration signifies a logical 1, shift it into register
+		if (timer_period_length_equals(562.5e-6 + 1687.5e-6)) {
+			// 562.5 us pulse followed by a 1687.5 us gap duration
+			// signifies a logical 1, shift it into register
 			bits_received++;
 			shift_register <<= 1;
 			shift_register |= 1;
-		} else if (was_negative_pulse(IR_NEC_CLOCK_562us)) {
-			// 562.5 us gap duration signifies a logical 0, shift
-			// it into register
+		} else if (timer_period_length_equals(562.5e-6 + 562.5e-6)) {
+			// 562.5 us pulse followed by a 562.5 us gap duration
+			// signifies a logical 0, shift it into register
 			bits_received++;
 			shift_register <<= 1;
-		} else if (!was_positive_pulse(IR_NEC_CLOCK_562us)) {
-			// Only the following pulses are expected at this mode:
-			// a 562.5 us positive pulse (delimiter)
-			// a 562.5 us negative pulse (logical 0).
-			// a 1687.5 us negative pulse (logical 1),
-			// If anything other has been received, this is a
+		} else {
+			// If anything else has been received, this is a
 			// malformed transmission.
 			fsa_state = IR_NEC_FSA_STATE_MALFORMED;
-			printf("MB,%d, %d\n", ir_nec_demodulator_fsa_clock, bits_received);
+			break;
 		}
 		if (bits_received == 32){
-			fsa_state = IR_NEC_FSA_STATE_LASTPULSE;
-		}
-		break;
-	case IR_NEC_FSA_STATE_LASTPULSE:
-		// The last pulse in the code should be a single 562.5 us pulse.
-		if (was_positive_pulse(IR_NEC_CLOCK_562us)) {
+			// All bits have been received. We are now on the rising edge
+			// of a terminating 562.5 us pulse.  Its falling edge will be
+			// ignored. Therefore we return the FSA to the idle state here.
 			fsa_state = IR_NEC_FSA_STATE_IDLE;
-			// Decode a 32-bit logical code obtained after the
+
+			// Decode the 32-bit logical code obtained during the
 			// demodulation to obtain a 8-bit command.  The 32-bit
 			// code consists of the following (starting from the
 			// most-significant bit):
@@ -311,27 +250,26 @@ void ir_nec_process_pin_change(uint8_t new_bit){
 			// 2. logical inverse of target device address (8 bits);
 			// 3. command (8 bits);
 			// 4. logical inverse of command (8 bits).
+	#ifdef NEC_VANILLA_ADDRESS
 			uint8_t rx_address =			(uint8_t)  ((shift_register >> 24) & 0xFF);
 			uint8_t rx_address_verification =	(uint8_t) ~((shift_register >> 16) & 0xFF);
+	#else
+			uint16_t rx_address =			(uint16_t) ((shift_register >> 16) & 0xFFFF);
+	#endif
 			uint8_t rx_command =			(uint8_t)  ((shift_register >> 8) & 0xFF);
 			uint8_t rx_command_verification =	(uint8_t) ~((shift_register >> 0) & 0xFF);
 			shift_register = 0;
 			bits_received = 0;
-
-#ifndef BEHOLDTV_REMOTECONTROL
-			// Verify that address equals inverse of its inverse,
-			// and the same holds for the command.
-			if ( (rx_address == rx_address_verification)
-#else
-			// Check the address bits from the BeholdTV remote control,
-			// that uses a proprietary variant of the NEC protocol.
-			// This remote control is used for debugging.
-			if ((rx_address == 0x61 && rx_address_verification == 0x29)
-#endif
-			  && (rx_command == rx_command_verification)) {
+			// Verify that command equals inverse of its inverse,
+			if ( (rx_command == rx_command_verification)
+	#ifdef NEC_VANILLA_ADDRESS
+			// and, for the vanilla NEC case, the same holds for the address:
+			&& (rx_address == rx_address_verification)
+	#endif
+			   ) {
 				// If all checks passed, update the global
 				// variable and set the Receive complete flag.
-				ir_nec_last_address = rx_address;
+				ir_nec_last_address = (uint16_t) rx_address;
 				ir_nec_last_command = rx_command;
 				ir_nec_rx_complete_flag = IR_NEC_RX_COMPLETE;
 				fsa_state = IR_NEC_FSA_STATE_IDLE;
@@ -340,14 +278,7 @@ void ir_nec_process_pin_change(uint8_t new_bit){
 				// is malformed
 				fsa_state = IR_NEC_FSA_STATE_MALFORMED;
 			} 
-		} else {
-			// The last pulse has a wrong duration, so this is a
-			// malformed transmission.
-			fsa_state = IR_NEC_FSA_STATE_MALFORMED;
 		}
 	}
-	uint8_t old_clk = ir_nec_demodulator_fsa_clock;
-	// Reset the pulse-width-measuring software clock
-	ir_nec_demodulator_fsa_clock = 0;
-	
+	timer_period_measurement_start();
 }
