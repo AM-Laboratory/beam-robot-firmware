@@ -1,5 +1,5 @@
-#MCU=attiny13
-MCU=atmega328p
+MCU=attiny13
+#MCU=atmega328p
 CC=avr-gcc -mmcu=$(MCU)  -O2
 # The flags -Wl,-u,vfprintf -lprintf_flt -lm are required for the floating point printf to work properly;
 # if omitted, printf("%f"...) will print a question mark.
@@ -22,11 +22,11 @@ DUDE=avrdude
 %.hex: %.o
 	$(OBJCOPY) $< $@
 
-# %.burn.log: %.hex
-# 	$(DUDE) -c avrisp -p $(MCU) -P $(TTY) -b 19200 -U flash:w:$<:i
-
 %.burn.log: %.hex
-	$(DUDE) -c arduino -p $(MCU) -P $(TTY) -b 57600 -U flash:w:$<:i
+	$(DUDE) -c avrisp -p $(MCU) -P $(TTY) -b 19200 -U flash:w:$<:i
+
+# %.burn.log: %.hex
+# 	$(DUDE) -c arduino -p $(MCU) -P $(TTY) -b 57600 -U flash:w:$<:i
 
 main.o: main.c lib/*.c lib/*.h
 	$(CC) $< -o $@
