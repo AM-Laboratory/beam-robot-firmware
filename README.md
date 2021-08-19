@@ -1,3 +1,6 @@
+TWI test on CAT24C02 EEPROM chip
+
+
 # beam-robot-firmware
 
 В этой ветви: тестовый код для запуска на Arduino Nano (atmega328p+CH340G)
