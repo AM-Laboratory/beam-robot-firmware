@@ -11,14 +11,12 @@
 #include <util/delay.h>
 
 
-#include "lib/ir_nec.h"
+//#include "lib/ir_nec.h"
 //#include "lib/ir_nec.c"
 
 
-#include "uart.h"
-#include "uart.c"
-
-#include "lib/twi.c"
+#include "lib/uart.h"
+#include "lib/twi.h"
 
 
 #define PIN_IR PINB

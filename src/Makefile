@@ -14,7 +14,7 @@ DUDE=avrdude
 
 # Libraries
 #OBJECTS=lib/ir_nec.o
-OBJECTS=
+OBJECTS=lib/twi.o lib/uart.o
 # C files included from main.c
 DIRTY_OBJECTS=
 #DIRTY_OBJECTS=lib/timer_period.c
