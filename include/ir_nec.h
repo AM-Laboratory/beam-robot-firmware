@@ -1,4 +1,6 @@
 // NEC code infrared protocol
+#include <avr/io.h>
+#include "owi.h"
 
 #define IR_NEC_ADDRESSMODE_EXACT 0
 #define IR_NEC_ADDRESSMODE_BITMASK 1
@@ -82,11 +84,7 @@ typedef struct {
 	} \
 )
 
-// #define ir_nec_open_rx(streamname, a,b,c)  \
-// 	ir_nec_conf_t conf = {.respect_repeat_codes = a, .this_device_address = b, .address_mode = c}; \
-// 	FILE __stream = FDEV_SETUP_STREAM(NULL, ir_nec_getchar, _FDEV_SETUP_READ); \
-// 	FILE * streamname = &__stream; \
-// 	fdev_set_udata(streamname, &conf);
+#define ir_nec_init(clock_prescaler) owi_configure_reading(&ir_nec_process_pulse, (clock_prescaler), 1, 0)
 
 /* 
  * A finite-state automaton (FSA) used for demodulating a pulse-distance
@@ -120,4 +118,7 @@ typedef struct {
  * After receiving the last bit, the 
  *
  */
-void ir_nec_process_pin_change();
+void ir_nec_process_pulse(owi_pulse_t new_pulse);
+
+
+int ir_nec_input_setup();

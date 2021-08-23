@@ -40,13 +40,41 @@
  */
 
 
-
 volatile uint16_t ir_nec_last_address = 0;
 volatile uint8_t ir_nec_last_command = 0;
 volatile uint8_t ir_nec_rx_complete_flag = 0;
 #define IR_NEC_RX_COMPLETE 1
 #define IR_NEC_REPEAT_CODE 2
 
+owi_pulse_t NEC_INPUT_LOGICAL_ZERO = (owi_pulse_t) {
+	.firsthalf_pulsewidth = float_to_pulsewidth(562.5e-6),
+	.secondhalf_pulsewidth = float_to_pulsewidth(562.5e-6),
+	.edge_type = EDGE_TYPE_RISING
+};
+
+owi_pulse_t NEC_INPUT_LOGICAL_ONE = (owi_pulse_t) {
+	.firsthalf_pulsewidth = float_to_pulsewidth(562.5e-6),
+	.secondhalf_pulsewidth = float_to_pulsewidth(1687.5e-6),
+	.edge_type = EDGE_TYPE_RISING
+};
+
+owi_pulse_t NEC_INPUT_LEADING_PULSE = (owi_pulse_t) {
+	.firsthalf_pulsewidth = float_to_pulsewidth(9000e-6),
+	.secondhalf_pulsewidth = float_to_pulsewidth(4500e-6),
+	.edge_type = EDGE_TYPE_RISING
+};
+
+owi_pulse_t NEC_INPUT_REPEAT_CODE = (owi_pulse_t) {
+	.firsthalf_pulsewidth = float_to_pulsewidth(9000e-6),
+	.secondhalf_pulsewidth = float_to_pulsewidth(2250e-6),
+	.edge_type = EDGE_TYPE_RISING
+};
+
+int ir_nec_input_setup(){
+	owi_configure_reading(&ir_nec_process_pulse, 1, 0);
+}
+
+#define ERROR_MARGIN 200e-6
 
 /*
  * Synchronously read one byte from the infrared receiver and decode it using
@@ -153,7 +181,7 @@ char ir_nec_getchar(FILE * stream){
  *
  * Arguments: uint8_t new_bit - new pin value (0 or 1).
  */
-void ir_nec_process_pin_change(){
+void ir_nec_process_pulse(owi_pulse_t new_pulse){
 	// 32-bit shift register to store the demodulated 32-bit logical sequence.
 	static uint32_t shift_register = 0;
 	static uint8_t bits_received = 0; // received bits count
@@ -189,20 +217,19 @@ void ir_nec_process_pin_change(){
 		// now contains the time passed since the last transmission,
 		// i.e., garbage. This leading edge will be used to measure the
 		// initial period length from.
-		timer_period_length_equals(0); // Reset the timer
 		fsa_state = IR_NEC_FSA_STATE_LEADING_PULSE;
 		break;
 	case IR_NEC_FSA_STATE_LEADING_PULSE:
 		// Transmission has been initiated, but no bits received yet.
 		// This is a start sequence.
-		if (timer_period_length_equals(9000e-6 + 4500e-6)) {
+		if (pulse_equals(new_pulse, NEC_INPUT_LEADING_PULSE, ERROR_MARGIN)) {
 			// This was a leading 9 ms pulse followed by a 4.5 ms
 			// gap, which precedes a new incoming code.
 			fsa_state = IR_NEC_FSA_STATE_MESSAGE_BODY;
 			// Clear the shift register
 			shift_register = 0;
 			bits_received = 0;
-		} else if (timer_period_length_equals(9000e-6 + 2250e-6)) {
+		} else if (pulse_equals(new_pulse, NEC_INPUT_REPEAT_CODE, ERROR_MARGIN)) {
 			// This was a leading 9 ms pulse followed by a 2.25 ms
 			// gap, which indicates a repeat code. We are now on
 			// the rising edge of a terminating 562.5 us pulse.
@@ -219,13 +246,13 @@ void ir_nec_process_pin_change(){
 		break;
 	case IR_NEC_FSA_STATE_MESSAGE_BODY:
 		// Receiving a new significant pulse-distance modulated 32-bit code.
-		if (timer_period_length_equals(562.5e-6 + 1687.5e-6)) {
+		if (pulse_equals(new_pulse, NEC_INPUT_LOGICAL_ONE, ERROR_MARGIN)) {
 			// 562.5 us pulse followed by a 1687.5 us gap duration
 			// signifies a logical 1, shift it into register
 			bits_received++;
 			shift_register <<= 1;
 			shift_register |= 1;
-		} else if (timer_period_length_equals(562.5e-6 + 562.5e-6)) {
+		} else if (pulse_equals(new_pulse, NEC_INPUT_LOGICAL_ZERO, ERROR_MARGIN)) {
 			// 562.5 us pulse followed by a 562.5 us gap duration
 			// signifies a logical 0, shift it into register
 			bits_received++;
@@ -280,5 +307,5 @@ void ir_nec_process_pin_change(){
 			} 
 		}
 	}
-	timer_period_measurement_start();
 }
+
