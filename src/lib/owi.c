@@ -108,7 +108,7 @@ int owi_configure_reading(void (*input_pulse_callback)(owi_pulse_t), uint8_t new
 	// Start listening from the idle logic level.
 	// If the current logic level is active, listening will be
 	// started when it goes idle.
-	input_idle_logic_level = !!new_idle_logic_level;
+	input_idle_logic_level = new_idle_logic_level;
 
 	// Enable Input Capture Interrupt
 	TIMSK1 |= _BV(ICIE1);
@@ -230,17 +230,23 @@ int owi_send_pulses(owi_pulse_t ** pointers2pulses_to_transmit, size_t new_burst
 	if (output_current_halfpulse_idx == 0){
 		DDRB |= _BV(BIT_OC1A);
 		// Open OC1A for writing
+
+		// Select the correct polarity
+		TCCR1A |= _BV(COM1A1);
 		if (output_current_pulses_pointers[0]->edge_type){
 			// First low, then high;
+			// Clear OC1A immediately
 			PORTB &= ~_BV(BIT_OC1A);
+			// Set OC1A on the next Compare match
+			TCCR1A |= _BV(COM1A0);
 		} else {
 			// First high, then low;
+			// Set OC1A immediately
 			PORTB |= _BV(BIT_OC1A);
+			// Clear OC1A on the next Compare match
+			TCCR1A &= ~_BV(COM1A0);
 		}
-		TCCR1A |= _BV(COM1A0);
-		// Toggle the OC1A pin on Compare Match A.
 		OCR1A = TCNT1 + (uint16_t) (output_current_pulses_pointers[0]->firsthalf_pulsewidth / clock_period);
-		// Schedule a toggle after the first half-pulse width
 		TIMSK1 |= _BV(OCIE1A);
 		// Enable Match A interrupt
 		output_current_halfpulse_idx++;
@@ -248,6 +254,10 @@ int owi_send_pulses(owi_pulse_t ** pointers2pulses_to_transmit, size_t new_burst
 	}
 }
 
+/*
+ * This interrupt is set up to occur during sending bits.
+ * When it is called, it's time to send the next (half-)pulse.
+ */
 ISR(TIMER1_COMPA_vect){
 	cli();
 	if ((output_current_halfpulse_idx >> 1) == output_pulses_count){
@@ -262,13 +272,6 @@ ISR(TIMER1_COMPA_vect){
 		// Disable Match A interrupt
 		TIMSK1 &= ~_BV(OCIE1A);
 
-		// Pull OC1A to the idle value
-		if (output_idle_logic_level){
-			PORTB |= _BV(BIT_OC1A);
-		} else {
-			PORTB &= ~_BV(BIT_OC1A);
-		}
-
 		DDRB &= ~_BV(BIT_OC1A);
 		// Lock writing to OC1A 
 	} else {
@@ -277,16 +280,41 @@ ISR(TIMER1_COMPA_vect){
 			// This is the first half of the pulse.
 			OCR1A = TCNT1 + (uint16_t) (current_pulse->firsthalf_pulsewidth / clock_period);
 			// Schedule a toggle after the first half-pulse width.
+			TCCR1A &= ~_BV(COM1A1);
+			TCCR1A |= _BV(COM1A0);
 		} else {
 			// This is the second half of the pulse.
 			OCR1A = TCNT1 + (uint16_t) (current_pulse->secondhalf_pulsewidth / clock_period);
 			// Schedule a toggle after the second half-pulse width.
+
 		}
 		output_current_halfpulse_idx++;
+
+		// Select the logic level after the pulse
+		uint8_t next_logic_level;
+		if ((output_current_halfpulse_idx >> 1) == output_pulses_count) {
+			// This was the last pulse, pull OC1A to the idle level
+			next_logic_level = output_idle_logic_level;
+		} else {
+			next_logic_level = !output_current_pulses_pointers[output_current_halfpulse_idx >> 1]->edge_type;
+		}
+		if (next_logic_level){
+			// Set OC1A on the next Compare match
+			TCCR1A |= _BV(COM1A0);
+		} else {
+			// Clear OC1A on the next Compare match
+			TCCR1A &= ~_BV(COM1A0);
+		}
 	}
 	sei();
 }
 
+/*
+ * This interrupt is set up to occur when listening if the timer overflows
+ * without receiving any pulses (i.e., a timeout happens).
+ * Here we generate an overflow owi_pulse_t if we have been listening to a
+ * pulse.
+ */
 ISR(TIMER1_OVF_vect){
 	uint8_t timeout_logic_level = (PORTB >> BIT_ICP1) & 1;
 	// If a timeout occurred at the idle logic_level, then we probably just
@@ -316,8 +344,13 @@ ISR(TIMER1_OVF_vect){
 	}
 }
 
+/*
+ * This interrupt is set up to occur when listening.
+ * If it was called, it means that a new pulse edge has been received.
+ */
 ISR(TIMER1_CAPT_vect){
 	cli();
+	PORTB ^= _BV(5);
 	
 	// Toggle the input capture unit edge
 	TCCR1B ^= _BV(ICES1);
@@ -341,6 +374,7 @@ ISR(TIMER1_CAPT_vect){
 		// Record the second half width
 		received_pulse.secondhalf_pulsewidth = clock_period * ((uint32_t) ICR1);
 		input_pulse_firsthalf_width = 0;
+		
 
 		// Invoke the callback function
 		(*owi_input_pulse_callback)(received_pulse);

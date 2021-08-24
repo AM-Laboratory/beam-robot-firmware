@@ -10,70 +10,80 @@
 
 #include <util/delay.h>
 
-
-//#include "lib/ir_nec.h"
-//#include "lib/ir_nec.c"
-
-
-#include "lib/uart.h"
-#include "lib/twi.h"
+#include "ir_nec.h"
+#include "uart.h"
 
 
-#define PIN_IR PINB
-#define BIT_IR 3
-
-#if !defined (__AVR_ATmega328p__)
-#warning "Devices other than atmega328p not supported"
+#if __AVR_DEVICE_NAME__ != atmega328
+#error "Devices other than atmega328p not supported"
 #endif
 
 
-#define PAGE_SIZE 8
-// This should work with PAGE_SIZE <= 16, but for some reason only works for PAGE_SIZE <= 8!!
+#define BEHOLDTV_REMOTECONTROL_ADDRESS 0x61D6
+#define HYUNDAI_REMOTECONTROL_ADDRESS 0x8E40
 
-
-#define SLAVE (0xA0 >> 1)
 int main(){
-	DDRB = (1 << 5) | (1 << 4);
+	uart_init(_BV(TXEN0));
+	FILE uart_out = FDEV_SETUP_STREAM((void*) uart_putchar, NULL, _FDEV_SETUP_WRITE);
+	FILE uart_in = FDEV_SETUP_STREAM(NULL, uart_getchar, _FDEV_SETUP_READ);
+DDRD = (1 << 5); // Enable PWM out
+DDRB = (1 << 5) | (1 << 4);
+
+
+	stdout = &uart_out;
+	printf("Hello!\n");
+
+	float owi_clock_freq = 256.0 / F_CPU;
+	int result = owi_set_clock(4, float_to_pulsewidth(owi_clock_freq));
+	int result2 = ir_nec_input_setup();
+	printf("setup: %d, %d\r\n", result, result2);
+
+	FILE ir_nec_file = fdev_open_ir_nec(ir_nec_in, IR_NEC_REPEAT_CODES_RESPECT, BEHOLDTV_REMOTECONTROL_ADDRESS, IR_NEC_ADDRESSMODE_EXACT);
+	FILE * ir_nec_in = &ir_nec_file;
+
 	sei();
 	
-	uart_init(_BV(TXEN0));
-	stdout = &uart_out;
-	tw_init(TW_FREQ_100K, 1);
-	printf("Hello!\n");
-	uint8_t addr;
-	for (addr = 0; addr < 25; addr++){
-		uint8_t page_addr = addr << 4;
-		uint8_t * data = malloc(PAGE_SIZE + 1);
-		data[0] = page_addr;
-		printf("Writing %d bytes to address %x: ", PAGE_SIZE, data[0]);
-		uint8_t idx;
-		for (idx = 1; idx <= PAGE_SIZE; idx++){
-			data[idx] = (uint8_t) rand();
-			printf("%02x", data[idx]);
+	while (1){
+		_delay_ms(50);
+		uint8_t command = (uint8_t) ir_nec_getchar(ir_nec_in);
+		printf("Received command %d: %x\r\n", command, (uint8_t) command);
+		int8_t pwm = 0;
+		switch(command){
+		case 0:
+			pwm = 0;
+			break;
+		case 0x80:
+			pwm = 1;
+			break;
+		case 0x40:
+			pwm = 2;
+			break;
+		case 0xc0:
+			pwm = 3;
+			break;
+		case 0x20:
+			pwm = 4;
+			break;
+		case 0xa0:
+			pwm = 5;
+			break;
+		case 0x60:
+			pwm = 6;
+			break;
+		case 0xe0:
+			pwm = 7;
+			break;
+		case 0x10:
+			pwm = 8;
+			break;
+		case 0x90:
+			pwm = 9;
+			break;
+		default:
+			continue;
 		}
-		printf("\r\n");
-
-		ret_code_t ret = tw_master_transmit(SLAVE, data, PAGE_SIZE + 1, 0);
-		printf("Return code: %d\r\n", ret);
-
-		for (idx = 1; idx <= PAGE_SIZE; idx++){
-			data[idx] = 0;
-		}
-		_delay_ms(500);
-		printf("Receiving bytes...\r\n");
-		ret = tw_master_transmit(SLAVE, &page_addr, 1, 0);
-		printf("Requested address: %x; return code %d\r\n", page_addr, ret);
-		ret = tw_master_receive(SLAVE, data, PAGE_SIZE);
-		printf("Return code: %d\r\n", ret);
-		printf("Received %d bytes from address %x: ", PAGE_SIZE, page_addr);
-		for (idx = 0; idx < PAGE_SIZE; idx++){
-			printf("%02x", data[idx]);
-		}
-		printf("\r\n");
-		printf("---------------------------------------------------------------\r\n");
-		printf("\r\n");
-		free(data);
-		_delay_ms(1500);
+		OCR0B = 14 * pwm; // PWM
+		printf("Set OCR0B: %d/140\r\n", OCR0B);
 	}
 	return 0;
 }

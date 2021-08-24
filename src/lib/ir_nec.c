@@ -71,7 +71,7 @@ owi_pulse_t NEC_INPUT_REPEAT_CODE = (owi_pulse_t) {
 };
 
 int ir_nec_input_setup(){
-	owi_configure_reading(&ir_nec_process_pulse, 1, 0);
+	return owi_configure_reading(&ir_nec_process_pulse, 1, 0);
 }
 
 #define ERROR_MARGIN 200e-6
@@ -209,6 +209,9 @@ void ir_nec_process_pulse(owi_pulse_t new_pulse){
 	// The 32 significant bits of a new code are now received.
 
 	static uint8_t fsa_state = IR_NEC_FSA_STATE_IDLE;
+
+	printf("P: %f, %f, %d\r\n", owi_pulsewidth_to_float(new_pulse.firsthalf_pulsewidth), owi_pulsewidth_to_float(new_pulse.secondhalf_pulsewidth), new_pulse.edge_type);
+	printf("R: %f, %f, %d\r\n", owi_pulsewidth_to_float(NEC_INPUT_LEADING_PULSE.firsthalf_pulsewidth), owi_pulsewidth_to_float(NEC_INPUT_LEADING_PULSE.secondhalf_pulsewidth), NEC_INPUT_LEADING_PULSE.edge_type);
 
 	switch(fsa_state){
 	case IR_NEC_FSA_STATE_IDLE:
