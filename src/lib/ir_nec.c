@@ -71,7 +71,7 @@ owi_pulse_t NEC_INPUT_REPEAT_CODE = (owi_pulse_t) {
 };
 
 int ir_nec_input_setup(){
-	owi_configure_reading(&ir_nec_process_pulse, 1, 0);
+	return owi_configure_reading(&ir_nec_process_pulse, 1, 0);
 }
 
 #define ERROR_MARGIN 200e-6
