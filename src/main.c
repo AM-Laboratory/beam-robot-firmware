@@ -15,8 +15,8 @@
 //#include "lib/ir_nec.c"
 
 
-#include "lib/uart.h"
-#include "lib/twi.h"
+#include "uart.h"
+#include "twi.h"
 
 
 #define PIN_IR PINB
@@ -33,6 +33,9 @@
 
 #define SLAVE (0xA0 >> 1)
 int main(){
+	FILE uart_out = FDEV_SETUP_STREAM(uart_putchar, NULL, _FDEV_SETUP_WRITE);
+	FILE uart_in = FDEV_SETUP_STREAM(NULL, uart_getchar, _FDEV_SETUP_READ);
+
 	DDRB = (1 << 5) | (1 << 4);
 	sei();
 	
