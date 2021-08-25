@@ -12,7 +12,7 @@
 # BURN=sudo avrdude
 
 # for Windows:
-TTY=COM5
+TTY=COM3
 BURN=avrdude
 
 SRCDIR=./src
