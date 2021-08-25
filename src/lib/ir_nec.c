@@ -210,6 +210,9 @@ void ir_nec_process_pulse(owi_pulse_t new_pulse){
 
 	static uint8_t fsa_state = IR_NEC_FSA_STATE_IDLE;
 
+	printf("P: %f, %f, %d\r\n", owi_pulsewidth_to_float(new_pulse.firsthalf_pulsewidth), owi_pulsewidth_to_float(new_pulse.secondhalf_pulsewidth), new_pulse.edge_type);
+	printf("R: %f, %f, %d\r\n", owi_pulsewidth_to_float(NEC_INPUT_LEADING_PULSE.firsthalf_pulsewidth), owi_pulsewidth_to_float(NEC_INPUT_LEADING_PULSE.secondhalf_pulsewidth), NEC_INPUT_LEADING_PULSE.edge_type);
+
 	switch(fsa_state){
 	case IR_NEC_FSA_STATE_IDLE:
 	case IR_NEC_FSA_STATE_MALFORMED:
