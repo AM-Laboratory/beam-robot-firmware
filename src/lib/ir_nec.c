@@ -1,5 +1,6 @@
-#include <stdio.h>
 #include <stdint.h>
+
+#include "rgb_dbg.h"
 
 #include "ir_nec.h"
 /*
@@ -39,13 +40,6 @@
  *    incoming transmission if the destination address was wrong.
  */
 
-
-volatile uint16_t ir_nec_last_address = 0;
-volatile uint8_t ir_nec_last_command = 0;
-volatile uint8_t ir_nec_rx_complete_flag = 0;
-#define IR_NEC_RX_COMPLETE 1
-#define IR_NEC_REPEAT_CODE 2
-
 owi_pulse_t NEC_INPUT_LOGICAL_ZERO = (owi_pulse_t) {
 	.firsthalf_pulsewidth = float_to_pulsewidth(562.5e-6),
 	.secondhalf_pulsewidth = float_to_pulsewidth(562.5e-6),
@@ -70,82 +64,12 @@ owi_pulse_t NEC_INPUT_REPEAT_CODE = (owi_pulse_t) {
 	.edge_type = EDGE_TYPE_RISING
 };
 
-int ir_nec_input_setup(){
-	return owi_configure_reading(&ir_nec_process_pulse, 1, 0);
+int ir_nec_input_setup(void (*ir_nec_data_callback)(void*)){
+	return owi_configure_reading(&ir_nec_process_pulse, ir_nec_data_callback, 1, 0);
 }
 
 #define ERROR_MARGIN 200e-6
 
-/*
- * Synchronously read one byte from the infrared receiver and decode it using
- * the NEC protocol. Perform the address check: if the received transmission
- * was not directed to this device, wait for the next one.
- * Arguments:
- * FILE * stream - a pointer to the stream obtained from ir_nec_open_rx().
- */
-char ir_nec_getchar(FILE * stream){
-	// Extract user data from the FILE structure
-	ir_nec_conf_t * conf = (ir_nec_conf_t *) fdev_get_udata(stream);
-	
-	// Accept transmissions infinitely, until we get a transmission destined correctly.
-	while(1){
-		// Wait until a message is received completely
-		do {} while (!ir_nec_rx_complete_flag);
-
-		// If the received signal was a repeat code and we ignore them,
-		// wait for another transmission.
-		if (!conf->respect_repeat_codes && (ir_nec_rx_complete_flag == IR_NEC_REPEAT_CODE)) {
-			// Clear the flag to enable incoming transmissions
-			ir_nec_rx_complete_flag = 0;
-			continue; // go accept another transmission
-		}
-
-		// Clear the flag to enable incoming transmissions
-		ir_nec_rx_complete_flag = 0;
-		
-		// Perform an address check
-		switch(conf->address_mode){
-			case IR_NEC_ADDRESSMODE_EXACT:
-				// Destination address must be exactly equal to this
-				// device address
-				if (ir_nec_last_address != conf->this_device_address){
-					// Not equal, do not accept the command
-					// and wait for the next incoming
-					// transmission
-					continue;
-				}
-				// go down to the next case
-			case IR_NEC_ADDRESSMODE_BITMASK:
-				// This device's address is a bitmask.  Destination
-				// address must conform this bitmask Note: if the
-				// previous case holds and the addresses are equal, the
-				// bitmask check will also pass.
-				if ((ir_nec_last_address & conf->this_device_address) != ir_nec_last_address) {
-					// Does not conform, do not accept the command
-					// and wait for the next incoming
-					// transmission
-					continue;
-				}
-				// go down to the next case
-			case IR_NEC_ADDRESSMODE_REVERSE_BITMASK:
-				// Destination address is a bitmask. This device's
-				// address must conform this bitmask Note: if the
-				// previous case holds and the addresses are equal, the
-				// bitmask check will also pass.
-				if ((ir_nec_last_address & conf->this_device_address) != conf->this_device_address) {
-					// Does not conform, do not accept the command
-					// and wait for the next incoming
-					// transmission
-					continue;
-				}
-				// go down to the next case
-			case IR_NEC_ADDRESSMODE_IGNORE:
-				// Accept the command unconditionally.
-				return (char) ir_nec_last_command;
-		}
-		
-	}
-}
 
 /* 
  * A finite-state automaton (FSA) used for demodulating a pulse-distance
@@ -181,10 +105,13 @@ char ir_nec_getchar(FILE * stream){
  *
  * Arguments: uint8_t new_bit - new pin value (0 or 1).
  */
-void ir_nec_process_pulse(owi_pulse_t new_pulse){
+void ir_nec_process_pulse(owi_pulse_t new_pulse, void (*ir_nec_data_callback)(void*)){
 	// 32-bit shift register to store the demodulated 32-bit logical sequence.
 	static uint32_t shift_register = 0;
 	static uint8_t bits_received = 0; // received bits count
+
+	// For repeat codes
+	static ir_nec_code_t last_code;
 
 	#define IR_NEC_FSA_STATE_IDLE		0
 	// Waiting for a next incoming transmission after successfully
@@ -209,10 +136,14 @@ void ir_nec_process_pulse(owi_pulse_t new_pulse){
 	// The 32 significant bits of a new code are now received.
 
 	static uint8_t fsa_state = IR_NEC_FSA_STATE_IDLE;
+	dbg_color(DBG_GREEN | DBG_BLUE);
 
 	switch(fsa_state){
-	case IR_NEC_FSA_STATE_IDLE:
 	case IR_NEC_FSA_STATE_MALFORMED:
+		// This is to prevent reading extra repeated pulses from a malformed code
+		last_code.new_or_repeated = MALFORMED_CODE;
+		dbg_color(DBG_RED);
+	case IR_NEC_FSA_STATE_IDLE:
 		// We are on the rising edge of the leading pulse. The timer
 		// now contains the time passed since the last transmission,
 		// i.e., garbage. This leading edge will be used to measure the
@@ -235,7 +166,8 @@ void ir_nec_process_pulse(owi_pulse_t new_pulse){
 			// the rising edge of a terminating 562.5 us pulse.
 			// Its falling edge will be ignored. Therefore we
 			// return the FSA to the idle state here.
-			ir_nec_rx_complete_flag = IR_NEC_REPEAT_CODE;
+			last_code.new_or_repeated = REPEAT_CODE;
+			(*ir_nec_data_callback)(&last_code);
 			// FIXME: what if the last code was malformed?
 			// Need to add protection from repeating it.
 			fsa_state = IR_NEC_FSA_STATE_IDLE;
@@ -277,28 +209,22 @@ void ir_nec_process_pulse(owi_pulse_t new_pulse){
 			// 2. logical inverse of target device address (8 bits);
 			// 3. command (8 bits);
 			// 4. logical inverse of command (8 bits).
-	#ifdef NEC_VANILLA_ADDRESS
-			uint8_t rx_address =			(uint8_t)  ((shift_register >> 24) & 0xFF);
-			uint8_t rx_address_verification =	(uint8_t) ~((shift_register >> 16) & 0xFF);
-	#else
 			uint16_t rx_address =			(uint16_t) ((shift_register >> 16) & 0xFFFF);
-	#endif
 			uint8_t rx_command =			(uint8_t)  ((shift_register >> 8) & 0xFF);
 			uint8_t rx_command_verification =	(uint8_t) ~((shift_register >> 0) & 0xFF);
 			shift_register = 0;
 			bits_received = 0;
 			// Verify that command equals inverse of its inverse,
-			if ( (rx_command == rx_command_verification)
-	#ifdef NEC_VANILLA_ADDRESS
-			// and, for the vanilla NEC case, the same holds for the address:
-			&& (rx_address == rx_address_verification)
-	#endif
-			   ) {
+			if (rx_command == rx_command_verification) {
+				// All checks passed, call the callback and
+				// update the last code.
+				//
 				// If all checks passed, update the global
 				// variable and set the Receive complete flag.
-				ir_nec_last_address = (uint16_t) rx_address;
-				ir_nec_last_command = rx_command;
-				ir_nec_rx_complete_flag = IR_NEC_RX_COMPLETE;
+				last_code.address = rx_address;
+				last_code.command = rx_command;
+				last_code.new_or_repeated = NEW_CODE;
+				(*ir_nec_data_callback)(&last_code);
 				fsa_state = IR_NEC_FSA_STATE_IDLE;
 			} else {
 				// The checks have not passed, so this transmission
@@ -308,4 +234,3 @@ void ir_nec_process_pulse(owi_pulse_t new_pulse){
 		}
 	}
 }
-
