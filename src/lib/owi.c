@@ -23,7 +23,8 @@
 }
 owi_pulsewidth_t clock_period = 0;
 
-void (*owi_input_pulse_callback)(owi_pulse_t) = NULL;
+void (*owi_input_pulse_callback)(owi_pulse_t, void(*)(void*)) = NULL;
+void (*owi_input_data_callback)(void*) = NULL;
 
 uint8_t input_idle_logic_level = 0xFF;
 uint8_t output_idle_logic_level = 0;
@@ -83,7 +84,7 @@ int owi_set_clock(uint8_t new_clock_prescaler, owi_pulsewidth_t period){
  * - OWI_ERROR_BUS_ALREADY_RUNNING - tried to change the idle logical level
  *   mid-pulse.
  */
-int owi_configure_reading(void (*input_pulse_callback)(owi_pulse_t), uint8_t new_idle_logic_level, uint8_t use_noise_canceller){
+int owi_configure_reading(void (*input_pulse_callback)(owi_pulse_t, void(*)(void*)), void (*input_data_callback)(void*), uint8_t new_idle_logic_level, uint8_t use_noise_canceller){
 	if (input_pulse_callback == NULL){
 		// If the callback function points nowhere, listening does not
 		// make sense, as all the received information will go nowhere.
@@ -105,6 +106,7 @@ int owi_configure_reading(void (*input_pulse_callback)(owi_pulse_t), uint8_t new
 	}
 
 	owi_input_pulse_callback = (*input_pulse_callback);
+	owi_input_data_callback = (*input_data_callback);
 	// Start listening from the idle logic level.
 	// If the current logic level is active, listening will be
 	// started when it goes idle.
@@ -349,7 +351,7 @@ ISR(TIMER1_OVF_vect){
 
 		}
 		// Invoke the callback function
-		(*owi_input_pulse_callback)(received_pulse);
+		(*owi_input_pulse_callback)(received_pulse, owi_input_data_callback);
 	}
 }
 
@@ -359,8 +361,8 @@ ISR(TIMER1_OVF_vect){
  */
 ISR(TIMER1_CAPT_vect){
 	cli();
+
 	PORTB ^= _BV(5);
-	
 	// Toggle the input capture unit edge
 	TCCR1B ^= _BV(ICES1);
 
@@ -383,10 +385,9 @@ ISR(TIMER1_CAPT_vect){
 		// Record the second half width
 		received_pulse.secondhalf_pulsewidth = clock_period * ((uint32_t) ICR1);
 		input_pulse_firsthalf_width = 0;
-		
-
+	
 		// Invoke the callback function
-		(*owi_input_pulse_callback)(received_pulse);
+		(*owi_input_pulse_callback)(received_pulse, owi_input_data_callback);
 	}
 
 	reset_watch();

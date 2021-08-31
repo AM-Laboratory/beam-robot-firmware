@@ -1,5 +1,6 @@
 #include <stdint.h>
 
+#include <stdio.h>
 #include "rgb_dbg.h"
 
 #include "ir_nec.h"
@@ -113,70 +114,27 @@ void ir_nec_process_pulse(owi_pulse_t new_pulse, void (*ir_nec_data_callback)(vo
 	// For repeat codes
 	static ir_nec_code_t last_code;
 
-	#define IR_NEC_FSA_STATE_IDLE		0
-	// Waiting for a next incoming transmission after successfully
-	// receiving a code or receiving a malformed transmission.
+	static uint8_t is_receiving_bits = 0;
 
-	#define IR_NEC_FSA_STATE_MALFORMED	2
-	// Waiting for a next incoming transmission after receiving a malformed
-	// transmission, which is ignored silently.
-	// Note: IR_NEC_FSA_STATE_IDLE and IR_NEC_FSA_STATE_MALFORMED are
-	// defined to the same value, we only distinguish them in the code for
-	// better readability.
-
-	#define IR_NEC_FSA_STATE_LEADING_PULSE	1
-	// The first pin change has been observed; what is expected to be
-	// received now is a 9 ms leading pulse which marks a NEC protocol
-	// code. It may be followed by either a 4.5 ms gap, which precedes
-	// a new 32-bit message, or a 2.25 ms gap followed by a terminating
-	// 562.5 us pulse, which is a repeat code sent repeatedly while an IR
-	// remote control button is held depressed.
-
-	#define IR_NEC_FSA_STATE_MESSAGE_BODY	3
-	// The 32 significant bits of a new code are now received.
-
-	static uint8_t fsa_state = IR_NEC_FSA_STATE_IDLE;
-	dbg_color(DBG_GREEN | DBG_BLUE);
-
-	switch(fsa_state){
-	case IR_NEC_FSA_STATE_MALFORMED:
-		// This is to prevent reading extra repeated pulses from a malformed code
-		last_code.new_or_repeated = MALFORMED_CODE;
-		dbg_color(DBG_RED);
-	case IR_NEC_FSA_STATE_IDLE:
-		// We are on the rising edge of the leading pulse. The timer
-		// now contains the time passed since the last transmission,
-		// i.e., garbage. This leading edge will be used to measure the
-		// initial period length from.
-		fsa_state = IR_NEC_FSA_STATE_LEADING_PULSE;
-		break;
-	case IR_NEC_FSA_STATE_LEADING_PULSE:
-		// Transmission has been initiated, but no bits received yet.
-		// This is a start sequence.
-		if (pulse_equals(new_pulse, NEC_INPUT_LEADING_PULSE, ERROR_MARGIN)) {
-			// This was a leading 9 ms pulse followed by a 4.5 ms
-			// gap, which precedes a new incoming code.
-			fsa_state = IR_NEC_FSA_STATE_MESSAGE_BODY;
-			// Clear the shift register
-			shift_register = 0;
-			bits_received = 0;
-		} else if (pulse_equals(new_pulse, NEC_INPUT_REPEAT_CODE, ERROR_MARGIN)) {
-			// This was a leading 9 ms pulse followed by a 2.25 ms
-			// gap, which indicates a repeat code. We are now on
-			// the rising edge of a terminating 562.5 us pulse.
-			// Its falling edge will be ignored. Therefore we
-			// return the FSA to the idle state here.
-			last_code.new_or_repeated = REPEAT_CODE;
-			(*ir_nec_data_callback)(&last_code);
-			// FIXME: what if the last code was malformed?
-			// Need to add protection from repeating it.
-			fsa_state = IR_NEC_FSA_STATE_IDLE;
-		} else {
-			// This is a malformed transmission, presumably noise.
-			fsa_state = IR_NEC_FSA_STATE_MALFORMED;
-		}
-		break;
-	case IR_NEC_FSA_STATE_MESSAGE_BODY:
+	// Transmission has been initiated, but no bits received yet.
+	// This is a start sequence.
+	if (pulse_equals(new_pulse, NEC_INPUT_LEADING_PULSE, ERROR_MARGIN)) {
+		// This was a leading 9 ms pulse followed by a 4.5 ms
+		// gap, which precedes a new incoming code.
+		is_receiving_bits = 1;
+		// Clear the shift register
+		shift_register = 0;
+		bits_received = 0;
+	} else if (pulse_equals(new_pulse, NEC_INPUT_REPEAT_CODE, ERROR_MARGIN)) {
+		// This was a leading 9 ms pulse followed by a 2.25 ms
+		// gap, which indicates a repeat code. We are now on
+		// the rising edge of a terminating 562.5 us pulse.
+		// Its falling edge will be ignored. Therefore we
+		// return the FSA to the idle state here.
+		last_code.new_or_repeated = REPEAT_CODE;
+		(*ir_nec_data_callback)(&last_code);
+		is_receiving_bits = 0;
+	} else if (is_receiving_bits){
 		// Receiving a new significant pulse-distance modulated 32-bit code.
 		if (pulse_equals(new_pulse, NEC_INPUT_LOGICAL_ONE, ERROR_MARGIN)) {
 			// 562.5 us pulse followed by a 1687.5 us gap duration
@@ -192,45 +150,54 @@ void ir_nec_process_pulse(owi_pulse_t new_pulse, void (*ir_nec_data_callback)(vo
 		} else {
 			// If anything else has been received, this is a
 			// malformed transmission.
-			fsa_state = IR_NEC_FSA_STATE_MALFORMED;
-			break;
+			is_receiving_bits = 0;
+			// This is to prevent reading extra repeated pulses from a malformed code
+			last_code.new_or_repeated = MALFORMED_CODE;
 		}
-		if (bits_received == 32){
-			// All bits have been received. We are now on the rising edge
-			// of a terminating 562.5 us pulse.  Its falling edge will be
-			// ignored. Therefore we return the FSA to the idle state here.
-			fsa_state = IR_NEC_FSA_STATE_IDLE;
+	} else {
+		// Received something other than one of the leading pulses in
+		// the non-receiving-data-bits state. This may either be the
+		// pulse gap which precedes the leading pulse, or some kind of
+		// a stray pulse. Ignore that anyways.
+	}
+	if (bits_received == 32){
+		// All bits have been received. We are now on the rising edge
+		// of a terminating 562.5 us pulse.  Its falling edge will be
+		// ignored. Therefore we return the FSA to the idle state here.
+		is_receiving_bits = 0;
 
-			// Decode the 32-bit logical code obtained during the
-			// demodulation to obtain a 8-bit command.  The 32-bit
-			// code consists of the following (starting from the
-			// most-significant bit):
-			// 1. target device address (8 bits);
-			// 2. logical inverse of target device address (8 bits);
-			// 3. command (8 bits);
-			// 4. logical inverse of command (8 bits).
-			uint16_t rx_address =			(uint16_t) ((shift_register >> 16) & 0xFFFF);
-			uint8_t rx_command =			(uint8_t)  ((shift_register >> 8) & 0xFF);
-			uint8_t rx_command_verification =	(uint8_t) ~((shift_register >> 0) & 0xFF);
-			shift_register = 0;
-			bits_received = 0;
-			// Verify that command equals inverse of its inverse,
-			if (rx_command == rx_command_verification) {
-				// All checks passed, call the callback and
-				// update the last code.
-				//
-				// If all checks passed, update the global
-				// variable and set the Receive complete flag.
-				last_code.address = rx_address;
-				last_code.command = rx_command;
-				last_code.new_or_repeated = NEW_CODE;
-				(*ir_nec_data_callback)(&last_code);
-				fsa_state = IR_NEC_FSA_STATE_IDLE;
-			} else {
-				// The checks have not passed, so this transmission
-				// is malformed
-				fsa_state = IR_NEC_FSA_STATE_MALFORMED;
-			} 
-		}
+		// Decode the 32-bit logical code obtained during the
+		// demodulation to obtain a 8-bit command.  The 32-bit
+		// code consists of the following (starting from the
+		// most-significant bit):
+		// 1. target device address (8 bits);
+		// 2. logical inverse of target device address (8 bits);
+		// 3. command (8 bits);
+		// 4. logical inverse of command (8 bits).
+		uint16_t rx_address =			(uint16_t) ((shift_register >> 16) & 0xFFFF);
+		uint8_t rx_command =			(uint8_t)  ((shift_register >> 8) & 0xFF);
+		uint8_t rx_command_verification =	(uint8_t) ~((shift_register >> 0) & 0xFF);
+		shift_register = 0;
+		bits_received = 0;
+		// Verify that command equals inverse of its inverse,
+		if (rx_command == rx_command_verification) {
+			// All checks passed, call the callback and
+			// update the last code.
+			//
+			// If all checks passed, update the global
+			// variable and set the Receive complete flag.
+			last_code.address = rx_address;
+			last_code.command = rx_command;
+			last_code.new_or_repeated = NEW_CODE;
+			(*ir_nec_data_callback)(&last_code);
+			is_receiving_bits = 0;
+		} else {
+			// The checks have not passed, so this transmission
+			// is malformed
+			is_receiving_bits = 0;
+			// This is to prevent reading extra repeated pulses from a malformed code
+			last_code.new_or_repeated = MALFORMED_CODE;
+			dbg_color(DBG_RED);
+		} 
 	}
 }
