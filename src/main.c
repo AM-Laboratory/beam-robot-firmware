@@ -10,7 +10,7 @@
 
 #define BIT_IR 3
 #define BIT_PWM 1
-#define BIT_LED 2
+#define BIT_LED 4
 
 volatile uint8_t ir_receiving_bits_flag = 0;
 volatile uint8_t prev_TCNT0 = 0;
