@@ -27,7 +27,7 @@ build/main.o: src/main.c build
 # errors.  Just run it multiple times until succeeded. If it does not, try
 # moving the cables.
 install: build/main.hex
-	$(DUDE) -c avrisp -p $(MCU) -P $(TTY) -b 19200 -U flash:w:$<:i
+	$(DUDE) -c stk500 -p $(MCU) -P $(TTY) -b 115200 -U flash:w:$<:i
 
 # Read EEPROM memory into a file
 eeprom:
