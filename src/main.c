@@ -22,6 +22,7 @@ volatile uint8_t battery_ok;
 // The addresses that the remote controls send
 #define BEHOLDTV_REMOTECONTROL_ADDRESS 0x61D6
 #define HYUNDAI_REMOTECONTROL_ADDRESS 0x8E40
+#define REXANT_TOSHIBA_REMOTECONTROL_ADDRESS 0x02FD
 
 #define pwm_stop() { \
 PORTB &= ~(1 << BIT_PWM); \
@@ -67,15 +68,22 @@ DDRB |= (1 << BIT_PWM); \
 //	3	2.92
 // This calibration yields a linear dependence
 // Vcc = 1.61 * Vzener - 1.77.
+//
+// Vcc = 2.17 * Vzener - 3.31
 // We measure the voltage across Vzener, using Vcc as the voltage reference, therefore
 // ADCW = 1024 * Vzener / Vcc;
 // Substituting Vzener from the first equation, we get
 // ADCW = 6.36 * (100 * Vcc + 177) / Vcc.
+//
+// ADCW = 4.72 * (100 * Vcc + 331) / Vcc.
 // The greater is ADCW, the lower is Vcc.
-#define BATTERY_CRITICAL	(uint16_t) ((636ul * (350 + 177) / 350))
-#define BATTERY_IDLE_LOW	(uint16_t) ((636ul * (370 + 177) / 370))
-#define BATTERY_IDLE_MEDIUM	(uint16_t) ((636ul * (390 + 177) / 390))
-#define BATTERY_IDLE_HIGH	(uint16_t) ((636ul * (430 + 177) / 430))
+//
+// 310, 330, 350, 370, 390
+#define BATTERY_CRITICAL	(uint16_t) ((472ul * (330 + 331) / 330))
+
+#define BATTERY_IDLE_LOW	(uint16_t) ((472ul * (370 + 331) / 370))
+#define BATTERY_IDLE_MEDIUM	(uint16_t) ((472ul * (390 + 331) / 390))
+#define BATTERY_IDLE_HIGH	(uint16_t) ((472ul * (430 + 331) / 430))
 
 #define check_battery_health() { \
 	if (ADCW >= BATTERY_CRITICAL) { \
@@ -169,7 +177,7 @@ ISR(PCINT0_vect){
 			// These checks don't work anyway, so we skip them.
 
 			// Remote control device selectivity
-			if ((ir_shift_register >> 16) != BEHOLDTV_REMOTECONTROL_ADDRESS){
+			if ((ir_shift_register >> 16) != REXANT_TOSHIBA_REMOTECONTROL_ADDRESS){
 				// If this code is not from our remote control, do nothing
 				return;
 			}

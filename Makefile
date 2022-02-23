@@ -4,7 +4,7 @@ AS=avr-as -mmcu=$(MCU)
 #OBJCOPY=avr-objcopy -j .text -j .data -O ihex
 OBJCOPY=avr-objcopy -O ihex
 # TTY=/dev/ttyUSB0
-TTY=COM3
+TTY=COM4
 DUDE=avrdude
 # DUDE=sudo avrdude
 
@@ -29,6 +29,7 @@ build/main.o: src/main.c build
 install: build/main.hex
 #	$(DUDE) -c avrisp -p $(MCU) -P $(TTY) -b 19200 -U flash:w:$<:i -F
 	$(DUDE) -c avrisp -p $(MCU) -P $(TTY) -b 19200 -U flash:w:$<:i
+#	$(DUDE) -c stk500 -p $(MCU) -P $(TTY) -b 115200 -U flash:w:$<:i
 
 # Read EEPROM memory into a file
 eeprom:
