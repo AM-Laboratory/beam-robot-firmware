@@ -8,9 +8,18 @@
 #include <avr/eeprom.h>
 #include <util/delay.h>
 
-#define BIT_IR 3
+#define ADMUX_PB2 1
+#define ADMUX_PB3 3
+#define ADMUX_PB4 2
+#define ADMUX_PB5 0
+
+
 #define BIT_PWM 1
-#define BIT_LED 4
+#define BIT_LED 2
+#define BIT_IR 3
+
+#define BIT_ADC 4
+#define ADMUX_BIT ADMUX_PB4
 
 volatile uint8_t ir_receiving_bits_flag = 0;
 volatile uint8_t prev_TCNT0 = 0;
@@ -47,43 +56,13 @@ DDRB |= (1 << BIT_PWM); \
 	PORTB &= ~_BV(BIT_LED); \
 }
 
-// We scan the voltage on a 5.1 V 5 mA Zener diode that bypasses the digital
-// output pin of the TSOP1738 IR receiver. 
-// We use the following calibration:
-//	Vcc	Vzener
-//	4.4	3.77
-//	4.3	3.73
-//	4.2	3.68
-//	4.1	3.64
-//	4	3.6
-//	3.9	3.57
-//	3.8	3.5
-//	3.7	3.45
-//	3.6	3.37
-//	3.5	3.31
-//	3.4	3.23
-//	3.3	3.15
-//	3.2	3.06
-//	3.1	3.01
-//	3	2.92
-// This calibration yields a linear dependence
-// Vcc = 1.61 * Vzener - 1.77.
-//
-// Vcc = 2.17 * Vzener - 3.31
-// We measure the voltage across Vzener, using Vcc as the voltage reference, therefore
-// ADCW = 1024 * Vzener / Vcc;
-// Substituting Vzener from the first equation, we get
-// ADCW = 6.36 * (100 * Vcc + 177) / Vcc.
-//
-// ADCW = 4.72 * (100 * Vcc + 331) / Vcc.
-// The greater is ADCW, the lower is Vcc.
-//
-// 310, 330, 350, 370, 390
-#define BATTERY_CRITICAL	(uint16_t) ((472ul * (330 + 331) / 330))
-
-#define BATTERY_IDLE_LOW	(uint16_t) ((472ul * (370 + 331) / 370))
-#define BATTERY_IDLE_MEDIUM	(uint16_t) ((472ul * (390 + 331) / 390))
-#define BATTERY_IDLE_HIGH	(uint16_t) ((472ul * (430 + 331) / 430))
+// Battery level ADC reading, calculated as follows:
+// ADC = 1024 * Vbatt * R1 / (R1 + R2) / Vref,
+// where R1 = 680 Ohm, R2 = 3300 Ohm, Vref = 1.1 V.
+#define BATTERY_CRITICAL	524	// 3.3 V
+#define BATTERY_IDLE_LOW	572	// 3.6 V
+#define BATTERY_IDLE_MEDIUM	620	// 3.9 V
+#define BATTERY_IDLE_HIGH	668	// 4.2 V
 
 #define check_battery_health() { \
 	if (ADCW >= BATTERY_CRITICAL) { \
@@ -91,6 +70,7 @@ DDRB |= (1 << BIT_PWM); \
 		battery_ok = 0; \
 	} \
 }
+
 
 
 
@@ -145,7 +125,7 @@ ISR(PCINT0_vect){
 		ir_shift_register = 0;
 		// Turn on LED to show that the code is received now.
 		led_off();
-	ADCSRA &= ~(1 << ADIE);
+//	ADCSRA &= ~(1 << ADIE);
 	} else if(ir_receiving_bits_flag){
 		if(period > 15 && period < 25){
 			// 560 us + 560 us (approx. 20 clock cycles) = logical 0
@@ -160,7 +140,7 @@ ISR(PCINT0_vect){
 			// If received anything else, this is an error, stop receiving bits.
 			ir_receiving_bits_flag = 0;
 			led_on();
-	ADCSRA |= (1 << ADIE);
+//	ADCSRA |= (1 << ADIE);
 		}
 
 		// All 32 bits have successfully been received.
@@ -170,7 +150,7 @@ ISR(PCINT0_vect){
 			// Turn off LED to show that the code has been received
 			led_on();
 
-		ADCSRA |= (1 << ADIE);
+//		ADCSRA |= (1 << ADIE);
 			// Process received code
 			uint8_t command = (uint8_t) (ir_shift_register >> 8);
 
@@ -269,8 +249,9 @@ ISR(ADC_vect){
 
 int main(){
 	// Start up the ADC
-	// Select PB3 as the source of the Analog signal
-	ADMUX = 3;
+	// Select the source of the Analog signal;
+	// set Internal 1.1 V voltage reference
+	ADMUX = ADMUX_BIT | (1 << REFS0);
 	// Do NOT disable any Digital inputs to favor the Analog input.
 	DIDR0 = 0x00;
 	// Pin PB3 will be read as both analog and digital input.
