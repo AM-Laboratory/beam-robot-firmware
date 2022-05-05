@@ -65,7 +65,7 @@ DDRB |= (1 << BIT_PWM); \
 #define BATTERY_IDLE_HIGH	668	// 4.2 V
 
 #define check_battery_health() { \
-	if (ADCW >= BATTERY_CRITICAL) { \
+	if (ADCW <= BATTERY_CRITICAL) { \
 		pwm_stop(); \
 		battery_ok = 0; \
 	} \
@@ -79,13 +79,13 @@ void measure_and_show_battery_idle_voltage() {
 
 	// Blink once for low level, twice for med, and three times for high
 	uint8_t blinks = 0;
-	if (ADCW < BATTERY_IDLE_LOW) {
+	if (ADCW > BATTERY_IDLE_LOW) {
 		blinks++;
 	}
-	if (ADCW < BATTERY_IDLE_MEDIUM) {
+	if (ADCW > BATTERY_IDLE_MEDIUM) {
 		blinks++;
 	}
-	if (ADCW < BATTERY_IDLE_HIGH) {
+	if (ADCW > BATTERY_IDLE_HIGH) {
 		blinks++;
 	}
 	while(blinks > 0){
