@@ -19,8 +19,8 @@
 #define ADMUX_PB5 0
 
 // MCU pin functions, as defined by the bot electrical circuit diagram
-// Motor PWM on PB1. Note that this pin is also used as OCR0B, the Timer/Counter
-// output, so changing this will break the PWM.
+// Motor PWM on PB1. Note that this pin is also used as OCR0B, the
+// Timer/Counter output, so changing this will break the PWM.
 #define BIT_PWM 1
 // Signalling LED on PB2
 #define BIT_LED 2
@@ -35,11 +35,18 @@
 volatile uint8_t ir_receiving_bits_flag = 0;
 // Received bits count, from 0 to 32
 volatile uint8_t ir_received_bits_count = 0;
-// A shift register to store the 32 sequentially received bits, MSB received first
+// A shift register to store the 32 sequentially received bits, MSB received
+// first
 volatile uint32_t ir_shift_register = 0;
 
 // Previous value of the 8-bit timer/counter TCNT0
 volatile uint8_t prev_TCNT0 = 0;
+
+// We use the difference between the current timer/counter value and its
+// previous value to measure the pulse widths. This allows correct measurement
+// even if a timer overflow has happened once, but not twice. We therefore use
+// the second overflow as a trigger to hang up the IR receive.
+volatile uint8_t timer_overflow_twice;
 
 // Disable PWM output and pull it low
 #define pwm_stop() { \
@@ -123,9 +130,11 @@ ISR(PCINT0_vect){
 	// to 14 ms.
 	uint8_t period = TCNT0 - prev_TCNT0;
 	prev_TCNT0 = TCNT0;
+	timer_overflow_twice = 0;
 	
-	// The NEC code consists of a (9000 us negative + 4500 us positive) leading pulse,
-	// and 32 pulse-period-modulated bits which can be either
+	// The NEC code consists of a (9000 us negative + 4500 us positive)
+	// leading pulse, and 32 pulse-period-modulated bits which can be
+	// either
 	// (560 us pos. + 1680 us neg.) for logical 1, or
 	// (560 us pos. + 560 us neg.) for logical 0.
 	// An IR remote control also sends repeat codes if the key is held
@@ -141,16 +150,17 @@ ISR(PCINT0_vect){
 		led_off();
 	} else if(ir_receiving_bits_flag){
 		if(period > 15 && period < 25){
-			// 560 us + 560 us (approx. 20 clock cycles) = logical 0
+		// 560 us + 560 us (approx. 20 clock cycles) = logical 0
 			ir_shift_register <<= 1;
 			ir_received_bits_count++;
 		} else if (period > 35 && period < 45){
-			// 560 us + 1680 us (approx. 40 clock cycles) = logical 1
+		// 560 us + 1680 us (approx. 40 clock cycles) = logical 1
 			ir_shift_register <<= 1;
 			ir_shift_register |= 1;
 			ir_received_bits_count++;
 		} else {
-			// If received anything else, this is an error, stop receiving bits.
+		// If received anything else, this is an error, stop receiving
+		// bits.
 			ir_receiving_bits_flag = 0;
 			led_on();
 		}
@@ -175,18 +185,20 @@ ISR(PCINT0_vect){
 
 			// Remote control device selectivity
 			if ((ir_shift_register >> 16) != REMOTECONTROL_ADDRESS){
-				// If this code is not from our remote control, do nothing
+				// If this code is not from our remote control,
+				// do nothing
 				return;
 			}
 
 			// Squeeze the command out of the 32-bit code
 			uint8_t command = (uint8_t) (ir_shift_register >> 8);
+			uint8_t not_not_command = (uint8_t) ~((uint8_t) ir_shift_register);
 
 			// Verify that the command is correct
-			if (((uint8_t) command) != ((uint8_t) ~((uint8_t) ir_shift_register))){
-				// Command does not match its logical inverse which is
-				// sent after it, so this is a malformed command.
-				// Ignore it silently.
+			if (command != not_not_command) {
+				// Command does not match its logical inverse
+				// which is sent after it, so this is a
+				// malformed command.  Ignore it silently.
 				return;
 			}
 			
@@ -248,11 +260,25 @@ ISR(PCINT0_vect){
 	// Ignore any other pulses
 }
 
-/* Timer0 Overflow ISR. It is empty and only serves to clear the interrupt
- * flag. If we do not clear this flag, the ADC, which is fired by it, will only
- * fire once instead of triggering on each timer overflow.
+/* Timer0 Overflow ISR. This overflow serves two purposes: 
+ * 1. Clear the interrupt flag. If we do not clear this flag, the ADC, which is
+ * fired by it, will only fire once instead of triggering on each timer
+ * overflow.
+ * 2. Hang up the IR transmission if the timer has overflowed twice since the
+ * last bit has been received.  We use the difference between the current
+ * timer/counter value and its previous value to measure the pulse widths. This
+ * allows correct measurement even if a timer overflow has happened once, but
+ * not twice. We therefore use the second overflow as a trigger to hang up the
+ * IR receive, to avoid locking it up in the case an incomplete receive has happened.
  */
-ISR(TIM0_OVF_vect){}
+ISR(TIM0_OVF_vect){
+	if(timer_overflow_twice){
+		// Reset the IR receiver
+		ir_receiving_bits_flag = 0;
+		led_on();
+	}
+	timer_overflow_twice = !timer_overflow_twice;
+}
 
 /* 
  * ADC measurement complete Interrupt service routine. We only use the ADC to
@@ -318,18 +344,35 @@ int main(){
 		// The 8-bit clock counts from 0 to 255 and starts again at zero. When
 		// it encounters the value OCR0B, it clears the OC0B bit, and sets it
 		// high again when the counter is restarted from zero.
+		//
+		// The Timer/Counter serves two purposes at the same time.
+		// First, it is used to drive the PWM on the OC0B (PB1) pin.
+		// Second, it is used to measure the pulse widths for the
+		// pulse-period demodulation to decode the IR remote control
+		// signals. To measure the pulse lengths, we read the
+		// Timer/Counter value and store it in a variable. By
+		// calculating the difference between the current and the
+		// previous readings, we may evaluate the pulse period. As we
+		// carefully select the Timer/Counter frequency to 18.34 kHz
+		// (54 us per tick), pulse widths from 54 us to 14 ms can be
+		// measured. The NEC IR protocol uses pulse widths from 560 us
+		// to 9 ms. We also use the Timer overflow interrupt to hang up
+		// the IR code receive as soon as the timer overflows for the
+		// second time (i.e., 28 ms after the last pulse has been
+		// transmitted).
 		{
 			// - set Fast PWM mode with 0xFF as TOP;
 			// - set Clear OC0B on Compare Match.
 			TCCR0A = ((1 << WGM01) | (1 << WGM00)) | (1 << COM0B1);
 
-			// Divide system clock by 64 (this gives 18.34 kHz), approx. 54 us per tick.
+			// Divide system clock by 64 (this gives 18.34 kHz),
+			// approx. 54 us per tick.
 			// - set 64 as system clock divider
 			TCCR0B = 3;
 		}
 
-		// Do a quick self-test: briefly turn on the motor to full power and measure
-		// the loaded supply voltage.
+		// Do a quick self-test: briefly turn on the motor to full
+		// power and measure the loaded supply voltage.
 		{
 			OCR0B = 255; // PWM 100% duty cycle
 			pwm_start();
@@ -342,10 +385,12 @@ int main(){
 			pwm_stop();
 		}
 
-		// Set the Timer Overflow (i.e., the moment when the PWM opens the transistor)
-		// as the trigger event to start the voltage measurement.
+		// Set the Timer Overflow (i.e., the moment when the PWM opens
+		// the transistor) as the trigger event to start the voltage
+		// measurement.
 		{
-			// - set Timer/Counter Overflow as the ADC Auto Trigger Source
+			// - set Timer/Counter Overflow as the ADC Auto Trigger
+			// Source
 			ADCSRB = (1 << ADTS2);
 
 			// - set ADC Auto Trigger Enable
@@ -362,6 +407,7 @@ int main(){
 		// update_battery_status() is called at the corresponding
 		// interrupt vector.
 
+		// Introduce a one-second delay before becoming responsive
 		_delay_ms(1000);
 
 		// The LED is constantly shining to indicate the bot working
@@ -374,18 +420,10 @@ int main(){
 	}
 	while (!battery_status_critical){
 	// Main loop, normally running forever. It is only broken out of if the
-	// battery level falls below critical. The main loop mostly consists of
-	// waiting, but we hang up the IR receiver every second to avoid
-	// locking in incompletely received commands.
+	// battery level falls below critical. The PWM and IR remote control
+	// command receives run asynchronously, so we do nothing but wait
+	// forever here.
 		_delay_ms(1000);
-
-		// Reset the IR receiver
-		ir_receiving_bits_flag = 0;
-		led_on();
-		// If you see the LED blink for half-second or so after
-		// pressing an IR remote control button, then an incomplete
-		// transmission had probably happened. Consider moving the
-		// remote control to another position.
 	}
 
 	// Power-saving mode. It is entered if the battery voltage falls below
