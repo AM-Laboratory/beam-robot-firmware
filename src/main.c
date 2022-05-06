@@ -19,7 +19,8 @@
 #define ADMUX_PB5 0
 
 // MCU pin functions, as defined by the bot electrical circuit diagram
-// Motor PWM on PB1
+// Motor PWM on PB1. Note that this pin is also used as OCR0B, the Timer/Counter
+// output, so changing this will break the PWM.
 #define BIT_PWM 1
 // Signalling LED on PB2
 #define BIT_LED 2
