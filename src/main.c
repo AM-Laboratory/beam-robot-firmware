@@ -8,53 +8,67 @@
 #include <avr/eeprom.h>
 #include <util/delay.h>
 
+// IR remote control address and command codes are defined here
+#include "ir_remote_control_codes.h"
+
+// ADC multiplexer constants, as defined by the ATTiny13A docs, to select the
+// pin to connect the ADC to
 #define ADMUX_PB2 1
 #define ADMUX_PB3 3
 #define ADMUX_PB4 2
 #define ADMUX_PB5 0
 
-
+// MCU pin functions, as defined by the bot electrical circuit diagram
+// Motor PWM on PB1
 #define BIT_PWM 1
+// Signalling LED on PB2
 #define BIT_LED 2
+// IR receiver on PB3
 #define BIT_IR 3
-
+// Voltage divider to measure the battery voltage on PB4
 #define BIT_ADC 4
 #define ADMUX_BIT ADMUX_PB4
 
+// A flag indicating that receive of 32 command bits from the remote control
+// has been initiated and not yet finished
 volatile uint8_t ir_receiving_bits_flag = 0;
-volatile uint8_t prev_TCNT0 = 0;
+// Received bits count, from 0 to 32
 volatile uint8_t ir_received_bits_count = 0;
+// A shift register to store the 32 sequentially received bits, MSB received first
 volatile uint32_t ir_shift_register = 0;
 
-volatile uint8_t battery_ok;
+// Previous value of the 8-bit timer/counter TCNT0
+volatile uint8_t prev_TCNT0 = 0;
 
-// The addresses that the remote controls send
-#define BEHOLDTV_REMOTECONTROL_ADDRESS 0x61D6
-#define HYUNDAI_REMOTECONTROL_ADDRESS 0x8E40
-#define REXANT_TOSHIBA_REMOTECONTROL_ADDRESS 0x02FD
-
+// Disable PWM output and pull it low
 #define pwm_stop() { \
-PORTB &= ~(1 << BIT_PWM); \
-DDRB &= ~(1 << BIT_PWM); \
+	PORTB &= ~(1 << BIT_PWM); \
+	DDRB &= ~(1 << BIT_PWM); \
 }
 
 #define pwm_start() { \
-PORTB |= (1 << BIT_PWM); \
-DDRB |= (1 << BIT_PWM); \
+	PORTB |= (1 << BIT_PWM); \
+	DDRB |= (1 << BIT_PWM); \
 }
 
+// Launch the ADC once and wait for it to finish (synchronous).
+// The 10-bit reading will be stored in the 16-bit register ADCW.
 #define adc_fire_once(){ \
 	ADCSRA |= (1 << ADSC); \
 	loop_until_bit_is_set(ADCSRA, ADIF); \
 }
 
 #define led_on() { \
-	PORTB |= _BV(BIT_LED); \
+	PORTB |= 1 << BIT_LED; \
 }
 
 #define led_off() { \
-	PORTB &= ~_BV(BIT_LED); \
+	PORTB &= ~(1 << BIT_LED); \
 }
+
+// = 0 if battery voltage has fallen down to critical discharge and
+// 1 otherwise.
+volatile uint8_t battery_status_critical;
 
 // Battery level ADC reading, calculated as follows:
 // ADC = 1024 * Vbatt * R1 / (R1 + R2) / Vref,
@@ -64,20 +78,18 @@ DDRB |= (1 << BIT_PWM); \
 #define BATTERY_IDLE_MEDIUM	620	// 3.9 V
 #define BATTERY_IDLE_HIGH	668	// 4.2 V
 
-#define check_battery_health() { \
+#define update_battery_status() { \
 	if (ADCW <= BATTERY_CRITICAL) { \
 		pwm_stop(); \
-		battery_ok = 0; \
+		battery_status_critical = 1; \
 	} \
 }
 
-
-
-
+// Measure the battery voltage and indicate it by blinking the signal LED
+// several times: once for low level, twice for med, and three times for high
 void measure_and_show_battery_idle_voltage() {
 	adc_fire_once();
 
-	// Blink once for low level, twice for med, and three times for high
 	uint8_t blinks = 0;
 	if (ADCW > BATTERY_IDLE_LOW) {
 		blinks++;
@@ -97,7 +109,8 @@ void measure_and_show_battery_idle_voltage() {
 	}
 }
 
-/* Logical pin change interrupt vector. */
+/* Logical pin change interrupt vector. We use it to decode the IR remote
+ * control codes, as defined by the NEC protocol. */
 ISR(PCINT0_vect){
 	if((PINB >> BIT_IR) & 1){
 		// Only trigger on falling edge
@@ -110,10 +123,10 @@ ISR(PCINT0_vect){
 	uint8_t period = TCNT0 - prev_TCNT0;
 	prev_TCNT0 = TCNT0;
 	
-	// The NEC code consists of a 9000 us negative + 4500 us positive = leading pulse,
+	// The NEC code consists of a (9000 us negative + 4500 us positive) leading pulse,
 	// and 32 pulse-period-modulated bits which can be either
-	// 560 us pos. + 1680 us neg. for logical 1, or
-	// 560 us pos. + 560 us neg. for logical 0.
+	// (560 us pos. + 1680 us neg.) for logical 1, or
+	// (560 us pos. + 560 us neg.) for logical 0.
 	// An IR remote control also sends repeat codes if the key is held
 	// pressed, but we ignore them here.
 	if(period > 210){
@@ -125,7 +138,6 @@ ISR(PCINT0_vect){
 		ir_shift_register = 0;
 		// Turn on LED to show that the code is received now.
 		led_off();
-//	ADCSRA &= ~(1 << ADIE);
 	} else if(ir_receiving_bits_flag){
 		if(period > 15 && period < 25){
 			// 560 us + 560 us (approx. 20 clock cycles) = logical 0
@@ -140,28 +152,36 @@ ISR(PCINT0_vect){
 			// If received anything else, this is an error, stop receiving bits.
 			ir_receiving_bits_flag = 0;
 			led_on();
-//	ADCSRA |= (1 << ADIE);
 		}
 
-		// All 32 bits have successfully been received.
+		// All 32 bits have successfully been received. They consist of
+		// 16 address bits (which may, in turn, consist of a 8 bit
+		// address followed by its logical inversion, but this is not
+		// always the case) followed by a 8-bit command, which is in
+		// turn followed by its logical inversion. We decode this here.
+		// We first verify that the address is correct (the command is
+		// from our remote control, i.e., directed to our bot, not to
+		// an air conditioner nor a projector), and then verify that
+		// ~command == command_logical_inverse.
+		//
+		// Then, if everything is correct, we execute the action
+		// corresponding to the command immediately.
 		if(ir_received_bits_count == 32){
+			// Clear the flag and turn off LED to show that the
+			// code has been received
 			ir_receiving_bits_flag = 0;
-
-			// Turn off LED to show that the code has been received
 			led_on();
 
-//		ADCSRA |= (1 << ADIE);
-			// Process received code
-			uint8_t command = (uint8_t) (ir_shift_register >> 8);
-
-			// These checks don't work anyway, so we skip them.
-
 			// Remote control device selectivity
-			if ((ir_shift_register >> 16) != REXANT_TOSHIBA_REMOTECONTROL_ADDRESS){
+			if ((ir_shift_register >> 16) != REMOTECONTROL_ADDRESS){
 				// If this code is not from our remote control, do nothing
 				return;
 			}
-			// Correct command verification
+
+			// Squeeze the command out of the 32-bit code
+			uint8_t command = (uint8_t) (ir_shift_register >> 8);
+
+			// Verify that the command is correct
 			if (((uint8_t) command) != ((uint8_t) ~((uint8_t) ir_shift_register))){
 				// Command does not match its logical inverse which is
 				// sent after it, so this is a malformed command.
@@ -170,60 +190,54 @@ ISR(PCINT0_vect){
 			}
 			
 			
+			// Process commands corresponding to different remote
+			// control buttons. Buttons Power and 0-9 are used,
+			// with Power corresponding to motor power off, 1-9
+			// corresponding to PWM 10-90% and 0 corresponding to
+			// full power (100% PWM).
 			switch(command){
-			// Button POWER
-			case 0x48:
+			case REMOTECONTROL_BUTTON_POWER:
 				OCR0B = 0; // 0% PWM
 				pwm_stop();
 				measure_and_show_battery_idle_voltage();
 				break;
-			// Button 1
-			case 0x80:
+			case REMOTECONTROL_BUTTON_1:
 				OCR0B = 26; // 10% PWM
 				pwm_start();
 				break;
-			// Button 2
-			case 0x40:
+			case REMOTECONTROL_BUTTON_2:
 				OCR0B = 51; // 20% PWM
 				pwm_start();
 				break;
-			// Button 3
-			case 0xc0:
+			case REMOTECONTROL_BUTTON_3:
 				OCR0B = 77; // 30% PWM
 				pwm_start();
 				break;
-			// Button 4
-			case 0x20:
+			case REMOTECONTROL_BUTTON_4:
 				OCR0B = 102; // 40% PWM
 				pwm_start();
 				break;
-			// Button 5
-			case 0xa0:
+			case REMOTECONTROL_BUTTON_5:
 				OCR0B = 127; // 50% PWM
 				pwm_start();
 				break;
-			// Button 6
-			case 0x60:
+			case REMOTECONTROL_BUTTON_6:
 				OCR0B = 153; // 60% PWM
 				pwm_start();
 				break;
-			// Button 7
-			case 0xe0:
+			case REMOTECONTROL_BUTTON_7:
 				OCR0B = 179; // 70% PWM
 				pwm_start();
 				break;
-			// Button 8
-			case 0x10:
+			case REMOTECONTROL_BUTTON_8:
 				OCR0B = 204; // 80% PWM
 				pwm_start();
 				break;
-			// Button 9
-			case 0x90:
+			case REMOTECONTROL_BUTTON_9:
 				OCR0B = 230; // 90% PWM
 				pwm_start();
 				break;
-			// Button 0
-			case 0x0:
+			case REMOTECONTROL_BUTTON_0:
 				OCR0B = 255; // 100% PWM
 				pwm_start();
 				break;
@@ -244,102 +258,155 @@ ISR(TIM0_OVF_vect){}
  * estimate the battery level.
  */
 ISR(ADC_vect){
-	check_battery_health();
+	update_battery_status();
 }
 
 int main(){
-	// Start up the ADC
-	// Select the source of the Analog signal;
-	// set Internal 1.1 V voltage reference
-	ADMUX = ADMUX_BIT | (1 << REFS0);
-	// Do NOT disable any Digital inputs to favor the Analog input.
-	DIDR0 = 0x00;
-	// Pin PB3 will be read as both analog and digital input.
+	// Start up the ADC:
+	{
+		// - select the source of the Analog signal;
+		// - set Internal 1.1 V voltage reference.
+		ADMUX = ADMUX_BIT | (1 << REFS0);
 
-	// Enable the Analog-Digital converter in the Single Conversion mode; also enable
-	// the ADC conversion finished Interrupt.
-	// Set the frequency to 1/16 of the CPU frequency (< 200 kHz) to ensure
-	// 10 bit conversion.
-	ADCSRA = (1 << ADEN) | 4;
-	// Also let it run once, to initialize.
-	adc_fire_once();
+		// - enable the Analog-Digital converter in the Single Conversion mode; 
+		// - set the frequency to 1/16 of the CPU frequency (< 200 kHz) to
+		// ensure 10 bit conversion.
+		ADCSRA = (1 << ADEN) | 4;
+
+		// Also let it run once, to initialize.
+		adc_fire_once();
+	}
 
 	// Enable Write on the LED pin
 	DDRB |= 1 << BIT_LED;
 
-	battery_ok = 1;
-	measure_and_show_battery_idle_voltage();
-	check_battery_health();
 
-	if(battery_ok) {
-		// Enable Pin Change Interrupt
+	// Run the initial idle battery check. Indicate the result, and jump
+	// straight to the power-saving mode if the battery level is below
+	// critical.
+	{
+		// Initialize as not critical
+		battery_status_critical = 0;
+
+		measure_and_show_battery_idle_voltage();
+
+		// battery_status_critical is updated here to 1 if the voltage
+		// is below critical.
+		update_battery_status();
+	}
+	if(!battery_status_critical) {
+	// Run the startup sequence, or skip it going directly to the
+	// power-saving mode if the battery voltage is below the critical
+	// level.
+
+		// Enable Pin Change Interrupt which we use to process the IR
+		// remote control codes.
 		GIMSK = 1 << PCIE;
+
 		// Select only pin BIT_IR for Pin Change Interrupt
 		PCMSK = 1 << BIT_IR;
 
 
 		// Enable Write on the PWM pin
 		DDRB |= 1 << BIT_PWM;
-		
-		// Init Timer/Counter for PWM generation and IR pulse decoding.
-		// Set Fast PWM mode with generation of a Non-inverting signal on pin OC0B.
+	
+
+		// Init Timer/Counter for PWM generation and IR pulse decoding:
+		// Set Fast PWM mode with generation of a Non-inverting signal
+		// on pin OC0B, which is the same pin as PB1 aka PWM pin.
 		// The 8-bit clock counts from 0 to 255 and starts again at zero. When
 		// it encounters the value OCR0B, it clears the OC0B bit, and sets it
 		// high again when the counter is restarted from zero.
-		TCCR0A = _BV(WGM01) | _BV(WGM00) | _BV(COM0B1);
-		// divide system clock by 64 (this gives 18.34 kHz), approx. 54 us per tick.
-		TCCR0B = 3;
+		{
+			// - set Fast PWM mode with 0xFF as TOP;
+			// - set Clear OC0B on Compare Match.
+			TCCR0A = ((1 << WGM01) | (1 << WGM00)) | (1 << COM0B1);
+
+			// Divide system clock by 64 (this gives 18.34 kHz), approx. 54 us per tick.
+			// - set 64 as system clock divider
+			TCCR0B = 3;
+		}
 
 		// Do a quick self-test: briefly turn on the motor to full power and measure
 		// the loaded supply voltage.
-		OCR0B = 255;
-		pwm_start();
+		{
+			OCR0B = 255; // PWM 100% duty cycle
+			pwm_start();
 
-		_delay_ms(50);
+			_delay_ms(50);
 
-		check_battery_health();
+			adc_fire_once();
+			update_battery_status();
 
-		pwm_stop();
+			pwm_stop();
+		}
 
 		// Set the Timer Overflow (i.e., the moment when the PWM opens the transistor)
 		// as the trigger event to start the voltage measurement.
-		ADCSRB = 1 << ADTS2;
-		ADCSRA |= (1 << ADATE);
+		{
+			// - set Timer/Counter Overflow as the ADC Auto Trigger Source
+			ADCSRB = (1 << ADTS2);
 
-		TIMSK0 |= (1 << TOIE0);
+			// - set ADC Auto Trigger Enable
+			ADCSRA |= (1 << ADATE);
 
-		// Enable the ADC Complete Interrupt, which is used to check the battery health.
-		ADCSRA |= (1 << 3);
+			// - set Timer/Counter Overflow Interrupt Enable
+			TIMSK0 |= (1 << TOIE0);
+			// The corresponding interrupt vector is declared but
+			// empty, and is only used to clear the interrupt flag.
 
-
-	//	uint8_t test[4] = {0xca, 0xfe, 0xba, 0xbe};
-	//	eeprom_write_block(test, 0, 4);		
+		}
+		// - set Enable the ADC Complete Interrupt
+		ADCSRA |= (1 << ADIE);
+		// update_battery_status() is called at the corresponding
+		// interrupt vector.
 
 		_delay_ms(1000);
+
+		// The LED is constantly shining to indicate the bot working
+		// correctly, and blinked to indicate that something is
+		// happening.
 		led_on();
+
 		// We are ready to go, set Global Enable interrupts
 		sei();
 	}
-	while (battery_ok){
-		// Work
+	while (!battery_status_critical){
+	// Main loop, normally running forever. It is only broken out of if the
+	// battery level falls below critical. The main loop mostly consists of
+	// waiting, but we hang up the IR receiver every second to avoid
+	// locking in incompletely received commands.
 		_delay_ms(1000);
-		// Every second reset the IR receiver
+
+		// Reset the IR receiver
 		ir_receiving_bits_flag = 0;
 		led_on();
-		ADCSRA |= (1 << ADIE);
+		// If you see the LED blink for half-second or so after
+		// pressing an IR remote control button, then an incomplete
+		// transmission had probably happened. Consider moving the
+		// remote control to another position.
 	}
 
-	// Sleep mode
-	// Stop the PWM
-	pwm_stop();
-	// Disable all interrupts
-	GIMSK = 0;
-	// Disable all analog inputs
-	ADCSRA = 0;
-	// Turn off the LED
-	led_off();
-	// Do nothing but briefly blink the LED forever
+	// Power-saving mode. It is entered if the battery voltage falls below
+	// critical (around 3.3 V) at any point, and is used to prevent the
+	// battery overdischarge leading to quick battery deterioration. In
+	// this mode the normal operation is suspended, the motor is stopped
+	// and the bot becomes unresponsive to all inputs. To indicate that the
+	// bot is still powered on (in the sense that the power switch on the
+	// PCB is in the closed position), the LED is briefly blinked once
+	// every 3 seconds.
+	{
+		pwm_stop();
+
+		// Disable all interrupts
+		GIMSK = 0;
+		// Disable all analog inputs
+		ADCSRA = 0;
+		// Turn off the LED
+		led_off();
+	}
 	while (1){
+	// Do nothing but briefly blink the LED forever
 		_delay_ms(3000);
 		led_on();
 		_delay_ms(50);
