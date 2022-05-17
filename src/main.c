@@ -213,48 +213,41 @@ ISR(PCINT0_vect){
 				OCR0B = 0; // 0% PWM
 				pwm_stop();
 				measure_and_show_battery_idle_voltage();
-				break;
+				return;
 			case REMOTECONTROL_BUTTON_1:
 				OCR0B = 26; // 10% PWM
-				pwm_start();
 				break;
 			case REMOTECONTROL_BUTTON_2:
 				OCR0B = 51; // 20% PWM
-				pwm_start();
 				break;
 			case REMOTECONTROL_BUTTON_3:
 				OCR0B = 77; // 30% PWM
-				pwm_start();
 				break;
 			case REMOTECONTROL_BUTTON_4:
 				OCR0B = 102; // 40% PWM
-				pwm_start();
 				break;
 			case REMOTECONTROL_BUTTON_5:
 				OCR0B = 127; // 50% PWM
-				pwm_start();
 				break;
 			case REMOTECONTROL_BUTTON_6:
 				OCR0B = 153; // 60% PWM
-				pwm_start();
 				break;
 			case REMOTECONTROL_BUTTON_7:
 				OCR0B = 179; // 70% PWM
-				pwm_start();
 				break;
 			case REMOTECONTROL_BUTTON_8:
 				OCR0B = 204; // 80% PWM
-				pwm_start();
 				break;
 			case REMOTECONTROL_BUTTON_9:
 				OCR0B = 230; // 90% PWM
-				pwm_start();
 				break;
 			case REMOTECONTROL_BUTTON_0:
 				OCR0B = 255; // 100% PWM
-				pwm_start();
 				break;
+			default:
+				return;
 			}
+			pwm_start();
 		}
 	}
 	// Ignore any other pulses
