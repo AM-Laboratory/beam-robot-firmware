@@ -32,7 +32,13 @@
 
 // A flag indicating that receive of 32 command bits from the remote control
 // has been initiated and not yet finished
-volatile uint8_t ir_receiving_bits_flag = 0;
+typedef enum {
+	IR_STATE_IDLE,
+	IR_STATE_LEADING_9000ms,
+	IR_STATE_LEADING_4500ms,
+	IR_STATE_DATA_BITS
+} ir_state_t;
+volatile ir_state_t ir_state = IR_STATE_IDLE;
 // Received bits count, from 0 to 32
 volatile uint8_t ir_received_bits_count = 0;
 // A shift register to store the 32 sequentially received bits, MSB received
@@ -46,7 +52,11 @@ volatile uint8_t prev_TCNT0 = 0;
 // previous value to measure the pulse widths. This allows correct measurement
 // even if a timer overflow has happened once, but not twice. We therefore use
 // the second overflow as a trigger to hang up the IR receive.
-volatile uint8_t timer_overflow_twice;
+volatile uint8_t timer_overflow_flag;
+#define measure_period() \
+	TCNT0 - prev_TCNT0; \
+	prev_TCNT0 = TCNT0; \
+	timer_overflow_flag = 0
 
 // Disable PWM output and pull it low
 #define pwm_stop() { \
@@ -97,12 +107,11 @@ volatile uint8_t battery_status_critical;
 #define BATTERY_LEVEL_SPACING	12	// 0.3 V
 
 #define update_battery_status() { \
+	if (ADCH <= BATTERY_CRITICAL) { \
+		pwm_stop(); \
+		battery_status_critical = 1; \
+	} \
 }
-//	if (ADCH <= BATTERY_CRITICAL) { \
-//		pwm_stop(); \
-//		battery_status_critical = 1; \
-//	} \
-//}
 
 // Measure the battery voltage and indicate it by blinking the signal LED
 // several times: once for low level, twice for med, and three times for high
@@ -123,35 +132,63 @@ void measure_and_show_battery_idle_voltage() {
 /* Logical pin change interrupt vector. We use it to decode the IR remote
  * control codes, as defined by the NEC protocol. */
 ISR(PCINT0_vect){
-	if((PINB >> BIT_IR) & 1){
-		// Only trigger on falling edge
-		return;
-	}
-
-	// Read the 8-bit Timer/Counter and calculate the time difference with
-	// the previous falling edge. This allows measuring periods from 54 us
-	// to 14 ms.
-	uint8_t period = TCNT0 - prev_TCNT0;
-	prev_TCNT0 = TCNT0;
-	timer_overflow_twice = 0;
-	
 	// The NEC code consists of a (9000 us negative + 4500 us positive)
-	// leading pulse, and 32 pulse-period-modulated bits which can be
+	// leading pulse pair, and 32 pulse-period-modulated bits which can be
 	// either
 	// (560 us pos. + 1680 us neg.) for logical 1, or
 	// (560 us pos. + 560 us neg.) for logical 0.
 	// An IR remote control also sends repeat codes if the key is held
 	// pressed, but we ignore them here.
-	if(period > 210 || period < 15){
-		// 9000 us + 4500 us = leading pulse (approx. 250 clock cycles)
-		// Start receiving bits.
-		// Clear the shift register and set the flag.
-		ir_receiving_bits_flag = 1;
-		ir_received_bits_count = 0;
-		ir_shift_register = 0;
-		// Turn on LED to show that the code is received now.
-		led_off();
-	} else if(ir_receiving_bits_flag){
+	uint8_t is_rising_edge = ((PINB >> BIT_IR) & 1);
+	uint8_t period;
+	switch(ir_state){
+	case IR_STATE_IDLE:
+		if(!is_rising_edge){
+			// Only trigger on falling edge
+			// Do nothing, just reset the timer.
+			prev_TCNT0 = TCNT0;
+			timer_overflow_flag = 0;
+			ir_state = IR_STATE_LEADING_9000ms;
+		}
+		return;
+	case IR_STATE_LEADING_9000ms:
+		if(is_rising_edge){
+			// Only trigger on rising edge
+			period = measure_period();
+			if(period > 160 || period < 180){
+				// 9000 us positive leading pulse (approx. 170 clock cycles)
+				// Start receiving bits.
+				// Clear the shift register and set the flag.
+				ir_state = IR_STATE_LEADING_4500ms;
+			} else {
+				ir_state = IR_STATE_IDLE;
+			}
+		}
+		return;
+	case IR_STATE_LEADING_4500ms:
+		if(!is_rising_edge){
+			period = measure_period();
+			// Only trigger on falling edge
+			if(period > 80 || period < 90){
+				// 4500 us positive leading pulse (approx. 85 clock cycles)
+				// Start receiving bits.
+				// Clear the shift register and set the flag.
+				ir_state = IR_STATE_DATA_BITS;
+				ir_received_bits_count = 0;
+				ir_shift_register = 0;
+				// Turn on LED to show that the code is received now.
+				led_off();
+			} else {
+				ir_state = IR_STATE_IDLE;
+			}
+		}
+		return;
+	case IR_STATE_DATA_BITS:
+		if(is_rising_edge){
+			// Only trigger on falling edge
+			return;
+		}
+		period = measure_period();
 		uint8_t new_bit;
 		if(period > 15 && period < 25){
 		// 560 us + 560 us (approx. 20 clock cycles) = logical 0
@@ -162,8 +199,9 @@ ISR(PCINT0_vect){
 		} else {
 		// If received anything else, this is an error, stop receiving
 		// bits.
-			ir_receiving_bits_flag = 0;
+			ir_state = IR_STATE_IDLE;
 			led_on();
+			return;
 		}
 		ir_shift_register = (ir_shift_register << 1) | new_bit;
 		ir_received_bits_count++;
@@ -183,7 +221,7 @@ ISR(PCINT0_vect){
 		if(ir_received_bits_count == 32){
 			// Clear the flag and turn off LED to show that the
 			// code has been received
-			ir_receiving_bits_flag = 0;
+			ir_state = IR_STATE_IDLE;
 			led_on();
 
 			// Remote control device selectivity
@@ -220,7 +258,7 @@ ISR(PCINT0_vect){
 						pwm_start();
 					} else {
 						pwm_stop();
-						//measure_and_show_battery_idle_voltage();
+						measure_and_show_battery_idle_voltage();
 					}
 				}
 			}
@@ -241,12 +279,13 @@ ISR(PCINT0_vect){
  * IR receive, to avoid locking it up in the case an incomplete receive has happened.
  */
 ISR(TIM0_OVF_vect){
-	if(timer_overflow_twice){
+	if(timer_overflow_flag){
 		// Reset the IR receiver
-		ir_receiving_bits_flag = 0;
+		ir_state = IR_STATE_IDLE;
 		led_on();
+	} else {
+		timer_overflow_flag = 1;
 	}
-	timer_overflow_twice++;
 }
 
 /* 
@@ -261,8 +300,9 @@ int main(){
 	// Start up the ADC:
 	{
 		// - select the source of the Analog signal;
+		// - left-adjust the result
 		// - set Internal 1.1 V voltage reference.
-		ADMUX = ADMUX_BIT | (1 << REFS0);
+		ADMUX = ADMUX_BIT | (1 << REFS0) | (1 << ADLAR);
 
 		// - enable the Analog-Digital converter in the Single Conversion mode; 
 		// - set the frequency to 1/16 of the CPU frequency (< 200 kHz) to
@@ -284,7 +324,7 @@ int main(){
 		// Initialize as not critical
 		battery_status_critical = 0;
 
-		//measure_and_show_battery_idle_voltage();
+		measure_and_show_battery_idle_voltage();
 
 		// battery_status_critical is updated here to 1 if the voltage
 		// is below critical.
