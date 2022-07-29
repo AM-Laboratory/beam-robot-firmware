@@ -37,7 +37,7 @@ volatile uint8_t ir_receiving_bits_flag = 0;
 volatile uint8_t ir_received_bits_count = 0;
 // A shift register to store the 32 sequentially received bits, MSB received
 // first
-volatile uint32_t ir_shift_register = 0;
+uint32_t ir_shift_register = 0;
 
 // Previous value of the 8-bit timer/counter TCNT0
 volatile uint8_t prev_TCNT0 = 0;
@@ -151,21 +151,21 @@ ISR(PCINT0_vect){
 		// Turn on LED to show that the code is received now.
 		led_off();
 	} else if(ir_receiving_bits_flag){
+		uint8_t new_bit;
 		if(period > 15 && period < 25){
 		// 560 us + 560 us (approx. 20 clock cycles) = logical 0
-			ir_shift_register <<= 1;
-			ir_received_bits_count++;
+			new_bit = 0;
 		} else if (period > 35 && period < 50){
 		// 560 us + 1680 us (approx. 40 clock cycles) = logical 1
-			ir_shift_register <<= 1;
-			ir_shift_register |= 1;
-			ir_received_bits_count++;
+			new_bit = 1;
 		} else {
 		// If received anything else, this is an error, stop receiving
 		// bits.
 			ir_receiving_bits_flag = 0;
 			led_on();
 		}
+		ir_shift_register = (ir_shift_register << 1) | new_bit;
+		ir_received_bits_count++;
 
 		// All 32 bits have successfully been received. They consist of
 		// 16 address bits (which may, in turn, consist of a 8 bit
