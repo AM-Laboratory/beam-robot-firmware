@@ -431,7 +431,9 @@ int main(){
 		pwm_stop();
 
 		// Disable all interrupts
-		GIMSK = 0;
+		cli();
+		// Stop the Timer/Counter
+		TCCR0B = 0;
 		// Disable all analog inputs
 		ADCSRA = 0;
 		// Turn off the LED
