@@ -79,15 +79,25 @@ volatile uint8_t timer_overflow_twice;
 volatile uint8_t battery_status_critical;
 
 // Battery level ADC reading, calculated as follows:
-// ADC = 1024 * Vbatt * R1 / (R1 + R2) / Vref,
+//   ADC = (1024 * Vbatt * R1 / (R1 + R2) / Vref),
 // where R1 = 680 Ohm, R2 = 3300 Ohm, Vref = 1.1 V.
-#define BATTERY_CRITICAL	524	// 3.3 V
-#define BATTERY_IDLE_LOW	572	// 3.6 V
-#define BATTERY_IDLE_MEDIUM	620	// 3.9 V
-#define BATTERY_IDLE_HIGH	668	// 4.2 V
+// We configure the ADC for left-aligned 10-bit-in-uint16 storage, therefore
+//   ADCW = ADC << 6,
+//   ADCH = ADC >> 2.
+// Therefore,
+// -------------------------------------
+// | Bat. level | Voltage | ADC | ADCH |
+// | critical   | 3.3 V   | 524 | 131  |
+// | low        | 3.6 V   | 572 | 143  |
+// | medium     | 3.9 V   | 620 | 155  |
+// | full       | 4.2 V   | 668 | 167  |
+// -------------------------------------
+// The space between the levels is 12.
+#define BATTERY_CRITICAL	131	// 3.3 V
+#define BATTERY_LEVEL_SPACING	12	// 0.3 V
 
 #define update_battery_status() { \
-	if (ADCW <= BATTERY_CRITICAL) { \
+	if (ADCH <= BATTERY_CRITICAL) { \
 		pwm_stop(); \
 		battery_status_critical = 1; \
 	} \
@@ -98,22 +108,14 @@ volatile uint8_t battery_status_critical;
 void measure_and_show_battery_idle_voltage() {
 	adc_fire_once();
 
-	uint8_t blinks = 0;
-	if (ADCW > BATTERY_IDLE_LOW) {
-		blinks++;
-	}
-	if (ADCW > BATTERY_IDLE_MEDIUM) {
-		blinks++;
-	}
-	if (ADCW > BATTERY_IDLE_HIGH) {
-		blinks++;
-	}
-	while(blinks > 0){
+	// This value is positive if level is >= low (3.6 V)
+	int8_t battery_level = ADCH - (BATTERY_CRITICAL + BATTERY_LEVEL_SPACING);
+	while(battery_level >= 0){
 		led_on();
 		_delay_ms(400);
 		led_off();
 		_delay_ms(400);
-		blinks--;
+		battery_level -= BATTERY_LEVEL_SPACING;
 	}
 }
 
