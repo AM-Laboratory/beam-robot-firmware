@@ -97,11 +97,12 @@ volatile uint8_t battery_status_critical;
 #define BATTERY_LEVEL_SPACING	12	// 0.3 V
 
 #define update_battery_status() { \
-	if (ADCH <= BATTERY_CRITICAL) { \
-		pwm_stop(); \
-		battery_status_critical = 1; \
-	} \
 }
+//	if (ADCH <= BATTERY_CRITICAL) { \
+//		pwm_stop(); \
+//		battery_status_critical = 1; \
+//	} \
+//}
 
 // Measure the battery voltage and indicate it by blinking the signal LED
 // several times: once for low level, twice for med, and three times for high
@@ -210,46 +211,19 @@ ISR(PCINT0_vect){
 			// with Power corresponding to motor power off, 1-9
 			// corresponding to PWM 10-90% and 0 corresponding to
 			// full power (100% PWM).
-			switch(command){
-			case REMOTECONTROL_BUTTON_POWER:
-				OCR0B = 0; // 0% PWM
-				pwm_stop();
-				measure_and_show_battery_idle_voltage();
-				return;
-			case REMOTECONTROL_BUTTON_1:
-				OCR0B = 26; // 10% PWM
-				break;
-			case REMOTECONTROL_BUTTON_2:
-				OCR0B = 51; // 20% PWM
-				break;
-			case REMOTECONTROL_BUTTON_3:
-				OCR0B = 77; // 30% PWM
-				break;
-			case REMOTECONTROL_BUTTON_4:
-				OCR0B = 102; // 40% PWM
-				break;
-			case REMOTECONTROL_BUTTON_5:
-				OCR0B = 127; // 50% PWM
-				break;
-			case REMOTECONTROL_BUTTON_6:
-				OCR0B = 153; // 60% PWM
-				break;
-			case REMOTECONTROL_BUTTON_7:
-				OCR0B = 179; // 70% PWM
-				break;
-			case REMOTECONTROL_BUTTON_8:
-				OCR0B = 204; // 80% PWM
-				break;
-			case REMOTECONTROL_BUTTON_9:
-				OCR0B = 230; // 90% PWM
-				break;
-			case REMOTECONTROL_BUTTON_0:
-				OCR0B = 255; // 100% PWM
-				break;
-			default:
-				return;
+			uint8_t i;
+			for (i = 0; i < sizeof(IR_REMOTE_CONTROL_BUTTONS) / sizeof(ir_button_t); i++){
+				ir_button_t button = IR_REMOTE_CONTROL_BUTTONS[i];
+				if(command == button.command){
+					OCR0B = button.pwm_duty_cycle;
+					if(button.pwm_duty_cycle){
+						pwm_start();
+					} else {
+						pwm_stop();
+						//measure_and_show_battery_idle_voltage();
+					}
+				}
 			}
-			pwm_start();
 		}
 	}
 	// Ignore any other pulses
@@ -310,7 +284,7 @@ int main(){
 		// Initialize as not critical
 		battery_status_critical = 0;
 
-		measure_and_show_battery_idle_voltage();
+		//measure_and_show_battery_idle_voltage();
 
 		// battery_status_critical is updated here to 1 if the voltage
 		// is below critical.

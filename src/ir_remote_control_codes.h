@@ -12,3 +12,21 @@
 #define REMOTECONTROL_BUTTON_8		0x10
 #define REMOTECONTROL_BUTTON_9		0x90
 #define REMOTECONTROL_BUTTON_0		0x00
+
+typedef struct {
+	uint8_t command;
+	uint8_t pwm_duty_cycle;
+} ir_button_t;
+const ir_button_t IR_REMOTE_CONTROL_BUTTONS[] = {
+	{ .command = REMOTECONTROL_BUTTON_POWER, .pwm_duty_cycle = 0},
+	{ .command = REMOTECONTROL_BUTTON_1, .pwm_duty_cycle = 26},
+	{ .command = REMOTECONTROL_BUTTON_2, .pwm_duty_cycle = 51},
+	{ .command = REMOTECONTROL_BUTTON_3, .pwm_duty_cycle = 77},
+	{ .command = REMOTECONTROL_BUTTON_4, .pwm_duty_cycle = 102},
+	{ .command = REMOTECONTROL_BUTTON_5, .pwm_duty_cycle = 127},
+	{ .command = REMOTECONTROL_BUTTON_6, .pwm_duty_cycle = 153},
+	{ .command = REMOTECONTROL_BUTTON_7, .pwm_duty_cycle = 179},
+	{ .command = REMOTECONTROL_BUTTON_8, .pwm_duty_cycle = 204},
+	{ .command = REMOTECONTROL_BUTTON_9, .pwm_duty_cycle = 230},
+	{ .command = REMOTECONTROL_BUTTON_0, .pwm_duty_cycle = 255}
+};
