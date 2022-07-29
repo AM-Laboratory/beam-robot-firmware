@@ -141,7 +141,7 @@ ISR(PCINT0_vect){
 	// (560 us pos. + 560 us neg.) for logical 0.
 	// An IR remote control also sends repeat codes if the key is held
 	// pressed, but we ignore them here.
-	if(period > 210){
+	if(period > 210 || period < 15){
 		// 9000 us + 4500 us = leading pulse (approx. 250 clock cycles)
 		// Start receiving bits.
 		// Clear the shift register and set the flag.
@@ -155,7 +155,7 @@ ISR(PCINT0_vect){
 		// 560 us + 560 us (approx. 20 clock cycles) = logical 0
 			ir_shift_register <<= 1;
 			ir_received_bits_count++;
-		} else if (period > 35 && period < 45){
+		} else if (period > 35 && period < 50){
 		// 560 us + 1680 us (approx. 40 clock cycles) = logical 1
 			ir_shift_register <<= 1;
 			ir_shift_register |= 1;
@@ -272,7 +272,7 @@ ISR(TIM0_OVF_vect){
 		ir_receiving_bits_flag = 0;
 		led_on();
 	}
-	timer_overflow_twice = !timer_overflow_twice;
+	timer_overflow_twice++;
 }
 
 /* 
