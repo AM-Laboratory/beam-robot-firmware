@@ -1,5 +1,13 @@
-// A simple variable-PWM robot on ATTiny13
-#define F_CPU 1200000UL
+// Verified to compile correctly with avr-gcc 5.4.0
+
+// The device must run at factory fuses: 9.6 MHz frequency with CKDIV8 enabled,
+// therefore the CPU clock must run at 1.2 MHz.
+#define F_CPU 1200000UL // this line must be before #include <util/delay.h>!
+
+// We assume 20% accuracy of the CPU frequency, so the Timer/Counter accuracy
+// is also assumed to be equal to 20%.
+#define F_CPU_ACCURACY_PERCENT 20
+
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,16 +19,16 @@
 // IR remote control address and command codes are defined here
 #include "ir_remote_control_codes.h"
 
-// ADC multiplexer constants, as defined by the ATTiny13A docs, to select the
-// pin to connect the ADC to
-#define ADMUX_PB2 1
-#define ADMUX_PB3 3
-#define ADMUX_PB4 2
-#define ADMUX_PB5 0
+// ADC multiplexer constants, as defined by the ATTiny13A docs (ADMUX
+// register), to select the ADC listening pin
+#define ADC_ON_PB2 1
+#define ADC_ON_PB3 3
+#define ADC_ON_PB4 2
+#define ADC_ON_PB5 0
 
 // MCU pin functions, as defined by the bot electrical circuit diagram
-// Motor PWM on PB1. Note that this pin is also used as OCR0B, the
-// Timer/Counter output, so changing this will break the PWM.
+// Motor PWM on PB1. Note that the PWM pin must be OCR0B, the Timer/Counter
+// output, so changing this pin will break the PWM.
 #define BIT_PWM 1
 // Signalling LED on PB2
 #define BIT_LED 2
@@ -28,35 +36,90 @@
 #define BIT_IR 3
 // Voltage divider to measure the battery voltage on PB4
 #define BIT_ADC 4
-#define ADMUX_BIT ADMUX_PB4
 
-// A flag indicating that receive of 32 command bits from the remote control
-// has been initiated and not yet finished
+#define led_on() { \
+	PORTB |= 1 << BIT_LED; \
+}
+
+#define led_off() { \
+	PORTB &= ~(1 << BIT_LED); \
+}
+
+
+
+
+// States of the IR pulse-period demodulator state machine.
 typedef enum {
 	IR_STATE_IDLE,
+	// Input is steady positive, waiting for a falling edge that initiates
+	// an incoming transmission. This is the default state.
+
 	IR_STATE_LEADING_9000ms,
+	// Incoming transmission falling edge has been encountered, a 9 ms
+	// negative leading pulse now being received - waiting for the rising
+	// edge.
+
 	IR_STATE_LEADING_4500ms,
+	// A 9 ms negative leading pulse has been received, a 4.5 ms positive
+	// leading pulse now being received - waiting for the falling edge.
+
 	IR_STATE_DATA_BITS
+	// 32 data bits being received. Here, we measure full periods (falling
+	// edge to falling edge), so the timer is only read on falling edges.
 } ir_state_t;
+
 volatile ir_state_t ir_state = IR_STATE_IDLE;
+
+// Reset the IR receiver to the idle state
+#define ir_hangup() { \
+	ir_state = IR_STATE_IDLE; \
+	led_on(); \
+}
+
 // Received bits count, from 0 to 32
 volatile uint8_t ir_received_bits_count = 0;
+
 // A shift register to store the 32 sequentially received bits, MSB received
 // first
 uint32_t ir_shift_register = 0;
 
+
+
 // Previous value of the 8-bit timer/counter TCNT0
-volatile uint8_t prev_TCNT0 = 0;
+volatile uint8_t previous_TCNT0_value = 0;
 
 // We use the difference between the current timer/counter value and its
 // previous value to measure the pulse widths. This allows correct measurement
 // even if a timer overflow has happened once, but not twice. We therefore use
 // the second overflow as a trigger to hang up the IR receive.
 volatile uint8_t timer_overflow_flag;
-#define measure_period() \
-	TCNT0 - prev_TCNT0; \
-	prev_TCNT0 = TCNT0; \
+
+// Remember the current time as the previous measurement time for future
+// measurements. Clear the timer overflow flag, as the previous_TCNT0_value has been
+// updated.
+#define start_time_interval_measurement() \
+	previous_TCNT0_value = TCNT0; \
 	timer_overflow_flag = 0
+
+// Return the time_interval - the difference between the current time
+// (timer/counter value TCNT0) and the previous measurement time, - and
+// remember the current time as the previous measurement time for future
+// measurements.
+#define get_time_interval_since_last_measurement() \
+	TCNT0 - previous_TCNT0_value; \
+	start_time_interval_measurement()
+
+// Timer/Counter prescaler. We set the Timer/Counter to run at f = F_CPU / 64.
+#define TCNT_PRESCALER	64
+
+// Convert microseconds to Timer/Counter clock cycles at compile time. As the
+// CPU frequency deviates significantly from the configured value, we introduce
+// a second argument 'error_percent', which is the supposed deviation in
+// an integer number of percents. This is used to compute intervals, given by
+// the CPU frequency accuracy.
+#define usec_to_cycles(time_us, error_percent) \
+	(uint8_t) (F_CPU / 1000UL * (100 + (error_percent)) * (time_us) / TCNT_PRESCALER / 1000UL / 100)
+
 
 // Disable PWM output and pull it low
 #define pwm_stop() { \
@@ -69,19 +132,30 @@ volatile uint8_t timer_overflow_flag;
 	DDRB |= (1 << BIT_PWM); \
 }
 
+// Set the PWM duty cycle in a zero-duty-cycle-friendly manner.
+// For a nonzero duty cycle, we make sure that PWM is turned on. If the duty
+// cycle is zero, we "stop the PWM", i.e., explicitly write a logical zero into
+// the PWM pin, as the least duty cycle supported by the Timer/Counter PWM is
+// 1/256.
+// For convenient battery level checking, the battery voltage is also indicated
+// by LED blinking, if a zero duty cycle has been selected.
+#define pwm_set_duty_cycle(duty_cycle) { \
+	OCR0B = duty_cycle; \
+	if(duty_cycle){ \
+		pwm_start(); \
+	} else { \
+		pwm_stop(); \
+		measure_and_show_battery_idle_voltage(); \
+	} \
+}
+
+
+
 // Launch the ADC once and wait for it to finish (synchronous).
 // The 10-bit reading will be stored in the 16-bit register ADCW.
 #define adc_fire_once(){ \
 	ADCSRA |= (1 << ADSC); \
 	loop_until_bit_is_set(ADCSRA, ADIF); \
-}
-
-#define led_on() { \
-	PORTB |= 1 << BIT_LED; \
-}
-
-#define led_off() { \
-	PORTB &= ~(1 << BIT_LED); \
 }
 
 // = 0 if battery voltage has fallen down to critical discharge and
@@ -106,7 +180,7 @@ volatile uint8_t battery_status_critical;
 #define BATTERY_CRITICAL	131	// 3.3 V
 #define BATTERY_LEVEL_SPACING	12	// 0.3 V
 
-#define update_battery_status() { \
+#define ensure_battery_level_above_critical() { \
 	if (ADCH <= BATTERY_CRITICAL) { \
 		pwm_stop(); \
 		battery_status_critical = 1; \
@@ -129,6 +203,8 @@ void measure_and_show_battery_idle_voltage() {
 	}
 }
 
+
+
 /* Logical pin change interrupt vector. We use it to decode the IR remote
  * control codes, as defined by the NEC protocol. */
 ISR(PCINT0_vect){
@@ -140,25 +216,23 @@ ISR(PCINT0_vect){
 	// An IR remote control also sends repeat codes if the key is held
 	// pressed, but we ignore them here.
 	uint8_t is_rising_edge = ((PINB >> BIT_IR) & 1);
-	uint8_t period;
 	switch(ir_state){
 	case IR_STATE_IDLE:
 		if(!is_rising_edge){
-			// Only trigger on falling edge
-			// Do nothing, just reset the timer.
-			prev_TCNT0 = TCNT0;
-			timer_overflow_flag = 0;
+			// Only trigger on falling edge.
+			// Do nothing, just reset the timer and change into the
+			// next state.
+			start_time_interval_measurement();
 			ir_state = IR_STATE_LEADING_9000ms;
 		}
 		return;
 	case IR_STATE_LEADING_9000ms:
 		if(is_rising_edge){
 			// Only trigger on rising edge
-			period = measure_period();
-			if(period > 160 || period < 180){
-				// 9000 us positive leading pulse (approx. 170 clock cycles)
-				// Start receiving bits.
-				// Clear the shift register and set the flag.
+			uint8_t time_interval = get_time_interval_since_last_measurement();
+			if(time_interval > usec_to_cycles(9000, -F_CPU_ACCURACY_PERCENT)
+			&& time_interval < usec_to_cycles(9000, +F_CPU_ACCURACY_PERCENT)){
+			// 9000 us negative leading pulse (approx. 170 clock cycles)
 				ir_state = IR_STATE_LEADING_4500ms;
 			} else {
 				ir_state = IR_STATE_IDLE;
@@ -167,11 +241,12 @@ ISR(PCINT0_vect){
 		return;
 	case IR_STATE_LEADING_4500ms:
 		if(!is_rising_edge){
-			period = measure_period();
+			uint8_t time_interval = get_time_interval_since_last_measurement();
 			// Only trigger on falling edge
-			if(period > 80 || period < 90){
-				// 4500 us positive leading pulse (approx. 85 clock cycles)
-				// Start receiving bits.
+			if(time_interval > usec_to_cycles(4500, -F_CPU_ACCURACY_PERCENT)
+			&& time_interval < usec_to_cycles(4500, +F_CPU_ACCURACY_PERCENT)){
+			// 4500 us positive leading pulse (approx. 85 clock cycles)
+				// Start receiving the data bits.
 				// Clear the shift register and set the flag.
 				ir_state = IR_STATE_DATA_BITS;
 				ir_received_bits_count = 0;
@@ -188,19 +263,20 @@ ISR(PCINT0_vect){
 			// Only trigger on falling edge
 			return;
 		}
-		period = measure_period();
+		uint8_t time_interval = get_time_interval_since_last_measurement();
 		uint8_t new_bit;
-		if(period > 15 && period < 25){
-		// 560 us + 560 us (approx. 20 clock cycles) = logical 0
+		if(time_interval > usec_to_cycles(560 + 560, -F_CPU_ACCURACY_PERCENT)
+		&& time_interval < usec_to_cycles(560 + 560, +F_CPU_ACCURACY_PERCENT)){
+		// 560 us + 560 us (approx. 21 clock cycles) = logical 0
 			new_bit = 0;
-		} else if (period > 35 && period < 50){
-		// 560 us + 1680 us (approx. 40 clock cycles) = logical 1
+		} else if(time_interval > usec_to_cycles(560 + 1680, -F_CPU_ACCURACY_PERCENT)
+		       && time_interval < usec_to_cycles(560 + 1680, +F_CPU_ACCURACY_PERCENT)){
+		// 560 us + 1680 us (approx. 42 clock cycles) = logical 1
 			new_bit = 1;
 		} else {
 		// If received anything else, this is an error, stop receiving
 		// bits.
-			ir_state = IR_STATE_IDLE;
-			led_on();
+			ir_hangup();
 			return;
 		}
 		ir_shift_register = (ir_shift_register << 1) | new_bit;
@@ -221,8 +297,7 @@ ISR(PCINT0_vect){
 		if(ir_received_bits_count == 32){
 			// Clear the flag and turn off LED to show that the
 			// code has been received
-			ir_state = IR_STATE_IDLE;
-			led_on();
+			ir_hangup();
 
 			// Remote control device selectivity
 			if ((ir_shift_register >> 16) != REMOTECONTROL_ADDRESS){
@@ -245,26 +320,19 @@ ISR(PCINT0_vect){
 			
 			
 			// Process commands corresponding to different remote
-			// control buttons. Buttons Power and 0-9 are used,
-			// with Power corresponding to motor power off, 1-9
-			// corresponding to PWM 10-90% and 0 corresponding to
-			// full power (100% PWM).
+			// control buttons and set a corresponding duty cycle
+			// if a known button has been pressed.
 			uint8_t i;
 			for (i = 0; i < sizeof(IR_REMOTE_CONTROL_BUTTONS) / sizeof(ir_button_t); i++){
-				ir_button_t button = IR_REMOTE_CONTROL_BUTTONS[i];
-				if(command == button.command){
-					OCR0B = button.pwm_duty_cycle;
-					if(button.pwm_duty_cycle){
-						pwm_start();
-					} else {
-						pwm_stop();
-						measure_and_show_battery_idle_voltage();
-					}
+				ir_button_t maybe_this_button = IR_REMOTE_CONTROL_BUTTONS[i];
+				if(command == maybe_this_button.command){
+					pwm_set_duty_cycle(maybe_this_button.pwm_duty_cycle);
+					// We do not break here to keep the
+					// timing consistent.
 				}
 			}
 		}
 	}
-	// Ignore any other pulses
 }
 
 /* Timer0 Overflow ISR. This overflow serves two purposes: 
@@ -279,11 +347,21 @@ ISR(PCINT0_vect){
  * IR receive, to avoid locking it up in the case an incomplete receive has happened.
  */
 ISR(TIM0_OVF_vect){
+	// A Timer/Counter overflow has happened
 	if(timer_overflow_flag){
-		// Reset the IR receiver
-		ir_state = IR_STATE_IDLE;
-		led_on();
+		// This is the second or subsequent overflow, so calculating
+		// the difference between the Timer/Counter values does not
+		// make sense anymore. This should not happen with legal IR
+		// pulses, so what we have received must be garbage. So we
+		// reset the receiver to the default "waiting for incoming
+		// transmission" state.
+		//
+		// 14 to 28 ms from the last IR pulse may pass until hangup,
+		// depending on the Timer/Counter value at the last IR pulse.
+		ir_hangup();
 	} else {
+		// This is the first overflow. Here we remember that it
+		// happened.
 		timer_overflow_flag = 1;
 	}
 }
@@ -293,7 +371,7 @@ ISR(TIM0_OVF_vect){
  * estimate the battery level.
  */
 ISR(ADC_vect){
-	update_battery_status();
+	ensure_battery_level_above_critical();
 }
 
 int main(){
@@ -302,7 +380,7 @@ int main(){
 		// - select the source of the Analog signal;
 		// - left-adjust the result
 		// - set Internal 1.1 V voltage reference.
-		ADMUX = ADMUX_BIT | (1 << REFS0) | (1 << ADLAR);
+		ADMUX = ADC_ON_PB4 | (1 << REFS0) | (1 << ADLAR);
 
 		// - enable the Analog-Digital converter in the Single Conversion mode; 
 		// - set the frequency to 1/16 of the CPU frequency (< 200 kHz) to
@@ -328,7 +406,7 @@ int main(){
 
 		// battery_status_critical is updated here to 1 if the voltage
 		// is below critical.
-		update_battery_status();
+		ensure_battery_level_above_critical();
 	}
 	if(!battery_status_critical) {
 	// Run the startup sequence, or skip it going directly to the
@@ -349,12 +427,13 @@ int main(){
 
 		// Init Timer/Counter for PWM generation and IR pulse decoding:
 		// Set Fast PWM mode with generation of a Non-inverting signal
-		// on pin OC0B, which is the same pin as PB1 aka PWM pin.
-		// The 8-bit clock counts from 0 to 255 and starts again at zero. When
-		// it encounters the value OCR0B, it clears the OC0B bit, and sets it
-		// high again when the counter is restarted from zero.
+		// on pin OC0B, which is the same pin as PB1 aka PWM pin.  The
+		// 8-bit clock counts from 0 to 255 and starts again at zero.
+		// When it encounters the value OCR0B, it clears the OC0B bit,
+		// and sets it high again when the counter is restarted from
+		// zero.
 		//
-		// The Timer/Counter serves two purposes at the same time.
+		// The Timer/Counter serves three purposes at the same time.
 		// First, it is used to drive the PWM on the OC0B (PB1) pin.
 		// Second, it is used to measure the pulse widths for the
 		// pulse-period demodulation to decode the IR remote control
@@ -362,26 +441,28 @@ int main(){
 		// Timer/Counter value and store it in a variable. By
 		// calculating the difference between the current and the
 		// previous readings, we may evaluate the pulse period. As we
-		// carefully select the Timer/Counter frequency to 18.34 kHz
+		// carefully select the Timer/Counter frequency to 18.75 kHz
 		// (54 us per tick), pulse widths from 54 us to 14 ms can be
 		// measured. The NEC IR protocol uses pulse widths from 560 us
 		// to 9 ms. We also use the Timer overflow interrupt to hang up
 		// the IR code receive as soon as the timer overflows for the
-		// second time (i.e., 28 ms after the last pulse has been
+		// second time (14 to 28 ms after the last pulse has been
 		// transmitted).
+		// Third, Timer/Counter overflows are used to trigger periodic
+		// battery level checks.
 		{
 			// - set Fast PWM mode with 0xFF as TOP;
 			// - set Clear OC0B on Compare Match.
 			TCCR0A = ((1 << WGM01) | (1 << WGM00)) | (1 << COM0B1);
 
-			// Divide system clock by 64 (this gives 18.34 kHz),
-			// approx. 54 us per tick.
-			// - set 64 as system clock divider
+			// - set 64 as Timer/Counter prescaler, i.e., divide
+			// system clock by 64 for the Timer/Counter frequency
+			// (this gives 18.75 kHz), approx. 54 us per tick.
 			TCCR0B = 3;
 		}
 
 		// Do a quick self-test: briefly turn on the motor to full
-		// power and measure the loaded supply voltage.
+		// power and measure the loaded battery voltage.
 		{
 			OCR0B = 255; // PWM 100% duty cycle
 			pwm_start();
@@ -389,13 +470,14 @@ int main(){
 			_delay_ms(50);
 
 			adc_fire_once();
-			update_battery_status();
+			ensure_battery_level_above_critical();
 
 			pwm_stop();
 		}
 
 		// Set the Timer Overflow (i.e., the moment when the PWM opens
-		// the transistor) as the trigger event to start the voltage
+		// the transistor - we want the loaded voltage for critical
+		// discharge checks) as the trigger event to start the voltage
 		// measurement.
 		{
 			// - set Timer/Counter Overflow as the ADC Auto Trigger
@@ -413,7 +495,7 @@ int main(){
 		}
 		// - set Enable the ADC Complete Interrupt
 		ADCSRA |= (1 << ADIE);
-		// update_battery_status() is called at the corresponding
+		// ensure_battery_level_above_critical() is called at the corresponding
 		// interrupt vector.
 
 		// Introduce a one-second delay before becoming responsive
